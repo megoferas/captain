@@ -201,7 +201,8 @@ function Login() {
             <span></span>
             <button type="button" onClick=${() => press('0')}>0</button>
             <button type="button" class="ghostkey" aria-label="مسح" onClick=${() => setPin(pin.slice(0, -1))}><${Icon} name="backspace" size=${26} /></button>
-          </div>`}
+          </div>
+          <button class="btn" disabled=${busy || pin.length !== 6 || !code.trim()} onClick=${() => submit(pin)}>${busy ? 'جاري الدخول...' : 'دخول'}</button>`}
       ${err && html`<div class="note bad">${err}</div>`}
       <button class="linkbtn" style="align-self:center" onClick=${() => { setUsePw(!usePw); setErr(''); setPin(''); }}>${usePw ? 'الدخول بالـ PIN' : 'الدخول بكلمة سر (للإدارة)'}</button>
     </div>
@@ -1039,7 +1040,7 @@ function App() {
   useEffect(() => { window.__mounted = true; const b = document.getElementById('boot'); if (b) b.remove(); }, []);
 
   let body;
-  if (session === undefined || (session && me === undefined)) body = html`<div class="center"><img src="captain-logo.png" alt="الكابتن" /></div>`;
+  if (session === undefined || (session && (me === undefined || me === null))) body = html`<div class="center"><img src="captain-logo.png" alt="الكابتن" /></div>`;
   else if (!session) body = html`<${Login} />`;
   else if (me === false) body = html`<div class="login"><div class="login-sheet" style="margin-top:80px">
       <div class="h2">الحساب مش مفعّل</div><div class="soft">كلّم الإدارة عشان تفعّل حسابك.</div>

@@ -10,7 +10,7 @@
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="icon" href="icon-192.png">
-<link rel="stylesheet" href="styles.css?v=1">
+<link rel="stylesheet" href="styles.css?v=2">
 <!-- Fonts load in the background: the app never waits for them -->
 <link rel="stylesheet" media="print" onload="this.media='all'"
   href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600&family=Readex+Pro:wght@400;500;600&display=swap">
@@ -41,7 +41,7 @@
     });
     var modules = [
       ['htm/preact', 'https://cdn.jsdelivr.net/npm/htm@3.1.1/preact/standalone.module.js'],
-      ['config.js', './config.js?v=1'], ['icons.js', './icons.js?v=1'], ['app.js', './app.js?v=1']
+      ['config.js', './config.js?v=1'], ['icons.js', './icons.js?v=1'], ['app.js', './app.js?v=2']
     ];
     setTimeout(function () {
       if (window.__mounted) return;
@@ -64,6 +64,6 @@
 </script>
 
 <script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script type="module" src="app.js?v=1"></script>
+<script type="module" src="app.js?v=2"></script>
 </body>
 </html>
