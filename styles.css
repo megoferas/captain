@@ -143,3 +143,16 @@ input[type='datetime-local'].input, input[type='date'].input, input[type='time']
 .empty { display: flex; align-items: center; gap: 12px; padding: 16px; color: var(--soft); font-size: 14px; }
 .cal { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
 .cal .d { height: 40px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-family: var(--hf); font-size: 14px; }
+
+/* ---- v3: no double-tap zoom, money amounts, calendar cells ---- */
+html { touch-action: manipulation; -webkit-text-size-adjust: 100%; }
+body, button, a, input, select, label, .card, .page { touch-action: manipulation; }
+body { overscroll-behavior: none; }
+button, a, .nav, .chip, .btn, .pill { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.amt { font-family: var(--hf); font-weight: 600; font-size: 17px; direction: ltr; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.amt.pos { color: var(--green); }
+.amt.neg { color: var(--red-fg); }
+.cal-d { height: 40px; border: 0; border-radius: 12px; font-family: var(--hf); font-size: 14px; padding: 0; }
+.cal-d:disabled { cursor: default; }
+.iconbtn:disabled { opacity: 0.4; }
+select.select { min-width: 0; }

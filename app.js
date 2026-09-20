@@ -41,9 +41,44 @@ const distM = (lat1, lon1, lat2, lon2) => {
 const initial = (name) => ((name || '?').trim().charAt(0) || '?');
 const greet = () => (Number(new Intl.DateTimeFormat('en-GB', { timeZone: tzOf(), hour: '2-digit', hourCycle: 'h23' }).format(new Date())) < 12 ? 'صباح الخير' : 'مساء الخير');
 const firstName = (n) => String(n || '').trim().split(/\s+/)[0] || '';
+const fmtMoney = (n) => Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const monthStart = (key) => key.slice(0, 7) + '-01';
+const addMonths = (key, n) => { const [y, m] = key.slice(0, 7).split('-').map(Number); return new Date(Date.UTC(y, m - 1 + n, 1)).toISOString().slice(0, 10); };
+const daysInMonth = (key) => { const [y, m] = key.slice(0, 7).split('-').map(Number); return new Date(Date.UTC(y, m, 0)).getUTCDate(); };
+const monthName = (key) => new Intl.DateTimeFormat(AR, { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(keyToDate(monthStart(key)));
+const monthShort = (key) => new Intl.DateTimeFormat(AR, { month: 'long', timeZone: 'UTC' }).format(keyToDate(monthStart(key)));
+const daysUntil = (key) => Math.round((keyToDate(key) - keyToDate(todayKey())) / 86400000);
+// work of a month is paid in the NEXT month, on the payday chosen in the settings (31 = last day of the month)
+function paydayOf(monthKey, staff) {
+  const cfg = Number((staff && staff.payday_override) || CTX.S.payday_day || 1);
+  const next = addMonths(monthKey, 1);
+  return next.slice(0, 8) + pad2(Math.min(cfg, daysInMonth(next)));
+}
+
+/* ---- permissions (the database enforces them too; this only hides what you cannot use) ---- */
+const DEFAULT_PERMS = {
+  hr: ['employees.view', 'employees.edit', 'attendance.view', 'attendance.edit', 'leaves.decide', 'log.view'],
+  accountant: ['employees.view', 'attendance.view', 'advances.decide', 'payroll.view', 'payroll.edit'],
+  manager: ['employees.view', 'attendance.view', 'leaves.decide'],
+};
+const PERMS = [
+  ['employees.view', 'عرض الموظفين'], ['employees.edit', 'إضافة وتعديل الموظفين'], ['attendance.view', 'عرض الحضور'],
+  ['attendance.edit', 'تعديل الحضور واعتماده'], ['leaves.decide', 'الموافقة على الإجازات'], ['advances.decide', 'الموافقة على السلف'],
+  ['payroll.view', 'عرض المرتبات'], ['payroll.edit', 'مكافآت وخصومات وقفل الشهر'], ['payroll.reopen', 'إعادة فتح شهر مقفول'],
+  ['settings.edit', 'تعديل الإعدادات'], ['roles.manage', 'إدارة الأدوار والصلاحيات'], ['log.view', 'سجل النشاط'],
+];
+function can(p) {
+  const r = CTX.me && CTX.me.role;
+  if (!r || r === 'employee') return false;
+  if (r === 'super_admin') return true;
+  return ((CTX.S.role_permissions || DEFAULT_PERMS)[r] || []).includes(p);
+}
 
 function errText(msg) {
   const m = String(msg || '');
+  if (m.startsWith('advance_too_high:')) return 'أقصى مبلغ سلفة ليك ' + m.split(':')[1] + ' ج.م.';
+  if (m.startsWith('pending_reviews:')) return 'فيه ' + m.split(':')[1] + ' يوم انصراف تلقائي لسه محتاج مراجعة في الحضور.';
+  if (m.startsWith('pending_leaves:')) return 'فيه ' + m.split(':')[1] + ' طلب إجازة لسه ماتقررش فيه.';
   if (m.startsWith('outside_area:')) return 'أنت بعيد عن مكان الشغل (حوالي ' + m.split(':')[1] + ' متر). لازم تكون جوه النطاق.';
   const map = {
     weak_gps: 'إشارة الموقع ضعيفة. اطلع لمكان مفتوح وجرّب تاني.',
@@ -60,6 +95,18 @@ function errText(msg) {
     name_required: 'اكتب اسم الموظف.',
     only_super_admin_creates_admins: 'المدير العام بس يقدر يضيف إدارة.',
     'Invalid login credentials': 'الكود أو الـ PIN غلط.',
+    month_locked: 'الشهر ده مقفول. لازم تعيد فتحه الأول.',
+    not_pending: 'الطلب ده اتقرر فيه قبل كده.',
+    leave_overlap: 'عندك إجازة تانية في نفس الأيام.',
+    bad_dates: 'التواريخ مش مظبوطة.',
+    advance_pending: 'عندك طلب سلفة لسه ماتردش عليه.',
+    bad_amount: 'اكتب مبلغ صحيح.',
+    bad_installments: 'عدد الأقساط مش مسموح.',
+    month_not_ended: 'الشهر لسه ما خلصش.',
+    not_locked: 'الشهر مش مقفول.',
+    last_super_admin: 'لازم يفضل مدير عام واحد على الأقل.',
+    only_super_admin_can_change_roles: 'مش مسموحلك تغيّر الأدوار.',
+    bad_role: 'الدور مش صحيح.',
   };
   if (map[m]) return map[m];
   if (/already been registered|already exists|duplicate/i.test(m)) return 'الكود ده مستخدم قبل كده.';
@@ -217,7 +264,7 @@ const hm12 = (mins) => {
 };
 const shiftRange = (sh) => (sh ? hm12(shiftStartMin(sh)) + ' — ' + hm12(shiftStartMin(sh) + Math.round(Number(sh.hours) * 60)) : '');
 
-function EmpHome() {
+function EmpHome({ unread }) {
   const { me, S, shift } = CTX;
   const [last, setLast] = useState(undefined);
   const [month, setMonth] = useState([]);
@@ -225,6 +272,7 @@ function EmpHome() {
   const [gpsErr, setGpsErr] = useState('');
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(Date.now());
+  const [pay, setPay] = useState(null);
 
   async function load() {
     const first = todayKey().slice(0, 8) + '01';
@@ -234,8 +282,10 @@ function EmpHome() {
     ]);
     setLast(a.data && a.data[0] ? a.data[0] : null);
     setMonth(b.data || []);
+    const pr = await sb.rpc('my_payroll', { p_month: monthStart(todayKey()) });
+    if (!pr.error) setPay(pr.data);
   }
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); const t = setInterval(load, 60000); return () => clearInterval(t); }, []);
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, []);
   useEffect(() => {
     if (!navigator.geolocation) { setGpsErr('الموقع مش مدعوم على الجهاز ده.'); return; }
@@ -283,7 +333,7 @@ function EmpHome() {
   const dueAt = open && shift && S.auto_close_enabled !== false ? new Date(open.check_in).getTime() + shiftMs : null;
 
   return html`<div class="page">
-    <${Hero} title=${greet() + ' يا ' + firstName(me.full_name)} sub=${fmtDay(new Date())} />
+    <${Hero} title=${greet() + ' يا ' + firstName(me.full_name)} sub=${fmtDay(new Date())} bell=${html`<${Bell} count=${unread} />`} />
     <div class="body">
       ${last === undefined ? html`<div class="card"><div class="empty">لحظة...</div></div>` : open ? html`
         <div class="card">
@@ -323,6 +373,10 @@ function EmpHome() {
         <div class="stat"><span class="tile sm tone-amber"><${Icon} name="clock" size=${20} /></span><span class="big num">${lateDays}</span><span class="soft">تأخير</span></div>
         <div class="stat"><span class="tile sm tone-slate"><${Icon} name="auto" size=${20} /></span><span class="big num">${hoursSum}</span><span class="soft">ساعات شغل</span></div>
       </div>
+      ${pay && pay.calc && html`<a class="card" href="#salary" style="gap:8px">
+        <div class="row"><${Tile} icon="wallet" tone="red" /><div class="grow"><div class="soft">رصيدك لحد دلوقتي</div>
+          <div class="num" style="font-family:var(--hf);font-weight:600;font-size:30px;line-height:1.25">${fmtMoney(pay.calc.net)} <span class="soft" style="font-size:14px">ج.م</span></div></div><${Chev} /></div>
+        <div class="spread soft"><span>سعر الساعة ${fmtMoney(pay.calc.hour_rate)} ج.م</span><span>القبض ${fmtShort(keyToDate(paydayOf(monthStart(todayKey()), me)))}</span></div></a>`}
     </div>
   </div>`;
 }
@@ -391,6 +445,198 @@ function Profile() {
   </div>`;
 }
 
+const REQ_STATUS = {
+  pending: ['amber', 'بانتظار الرد'],
+  approved: ['green', 'اتقبل'],
+  rejected: ['red', 'اترفض'],
+  cancelled: ['sand', 'اتلغى'],
+};
+
+function MonthChips({ month, setMonth, count = 4 }) {
+  const cur = monthStart(todayKey());
+  const list = Array.from({ length: count }, (_, i) => addMonths(cur, -i));
+  return html`<div class="chips">${list.map((m) => html`<button class=${'chip' + (m === month ? ' on' : '')} onClick=${() => setMonth(m)}>${monthShort(m)}</button>`)}</div>`;
+}
+
+function PayRow({ icon, tone, label, hint, amount, kind }) {
+  return html`<div class="list-row"><${Tile} icon=${icon} tone=${tone} sm />
+    <div class="grow"><div style="font-weight:500">${label}</div><div class="soft">${hint}</div></div>
+    <div class=${'amt ' + (kind || '')}>${amount}</div></div>`;
+}
+
+function PayBreakdown({ c }) {
+  const rate = Number(c.hour_rate);
+  const otRate = (rate * Number(c.ot_pct)) / 100;
+  return html`<div class="card tight">
+    <${PayRow} icon="clock" tone="sand" label="ساعات الشغل" hint=${c.hours_regular + ' ساعة كاملة × ' + fmtMoney(rate)} amount=${fmtMoney(c.amount_regular)} />
+    ${(Number(c.paid_leave_days) > 0 || Number(c.unpaid_leave_days) > 0) && html`<${PayRow} icon="sun" tone="slate" label="إجازة مدفوعة"
+      hint=${c.paid_leave_days + ' يوم من ' + c.paid_leave_allowance + (Number(c.unpaid_leave_days) > 0 ? ' · ' + c.unpaid_leave_days + ' يوم من غير أجر' : '')} amount=${'+' + fmtMoney(c.amount_leave)} kind="pos" />`}
+    ${Number(c.hours_overtime) > 0 && html`<${PayRow} icon="auto" tone="amber" label="ساعات إضافية" hint=${c.hours_overtime + ' ساعة × ' + fmtMoney(otRate) + ' (' + c.ot_pct + '٪)'} amount=${'+' + fmtMoney(c.amount_overtime)} kind="pos" />`}
+    ${Number(c.bonus) > 0 && html`<${PayRow} icon="gift" tone="green" label="مكافآت" hint="من الإدارة" amount=${'+' + fmtMoney(c.bonus)} kind="pos" />`}
+    ${Number(c.advances) > 0 && html`<${PayRow} icon="down" tone="slate" label="قسط سلفة" hint="بيتخصم من المرتب" amount=${'−' + fmtMoney(c.advances)} kind="neg" />`}
+    ${Number(c.deductions) > 0 && html`<${PayRow} icon="minus" tone="red" label="خصومات" hint="من الإدارة" amount=${'−' + fmtMoney(c.deductions)} kind="neg" />`}
+    ${Number(c.late_deduction) > 0 && html`<${PayRow} icon="clock" tone="red" label="خصم تأخير" hint=${c.late_days + ' يوم تأخير'} amount=${'−' + fmtMoney(c.late_deduction)} kind="neg" />`}
+    <div class="spread" style="padding:14px 0 8px"><div class="h2">الصافي</div><div class="amt" style="font-size:22px">${fmtMoney(c.net)} ج.م</div></div>
+  </div>`;
+}
+
+function EmpSalary() {
+  const { me } = CTX;
+  const [month, setMonth] = useState(monthStart(todayKey()));
+  const [res, setRes] = useState(null);
+  const [prev, setPrev] = useState(null);
+  const [advs, setAdvs] = useState([]);
+  const [adjs, setAdjs] = useState([]);
+  const [leaves, setLeaves] = useState([]);
+  const cur = monthStart(todayKey());
+  async function load() {
+    const [a, b, c, d] = await Promise.all([
+      sb.rpc('my_payroll', { p_month: month }),
+      sb.from('pay_adjustments').select('*').eq('staff_id', me.id).eq('voided', false).gte('effective_date', month).lt('effective_date', addMonths(month, 1)).order('effective_date', { ascending: false }),
+      sb.from('advances').select('*').eq('staff_id', me.id).order('created_at', { ascending: false }).limit(8),
+      sb.from('leaves').select('*').eq('staff_id', me.id).order('from_date', { ascending: false }).limit(8),
+    ]);
+    if (a.error) toast(errText(a.error.message), 'bad'); else setRes(a.data);
+    setAdjs(b.data || []); setAdvs(c.data || []); setLeaves(d.data || []);
+    if (month === cur) { const p = await sb.rpc('my_payroll', { p_month: addMonths(cur, -1) }); setPrev(p.error ? null : p.data); } else setPrev(null);
+  }
+  useEffect(() => { setRes(null); load(); const t = setInterval(load, 60000); return () => clearInterval(t); }, [month]);
+  const c = res && res.calc;
+  const pd = paydayOf(month, me);
+  const left = daysUntil(pd);
+  const isCur = month === cur;
+  const prevDue = prev && prev.calc && prev.status !== 'paid' && Number(prev.calc.net) > 0;
+  return html`<div class="page">
+    <${Hero} title="رصيدي" sub=${monthName(month)} />
+    <div class="body">
+      <div class="card" style="align-items:center;text-align:center;gap:6px">
+        <div class="soft">${isCur ? 'الصافي لحد دلوقتي' : 'صافي مرتب الشهر'}</div>
+        <div class="num" style="font-family:var(--hf);font-weight:600;font-size:44px;line-height:1.2">${c ? fmtMoney(c.net) : '...'} <span class="soft" style="font-size:18px">ج.م</span></div>
+        <div class="chips" style="justify-content:center"><${Pill} tone="sand" icon="calendar">القبض ${fmtShort(keyToDate(pd))}<//>
+          ${left > 0 ? html`<${Pill} tone="green">باقي ${left} يوم<//>` : html`<${Pill} tone="green">${res && res.status === 'paid' ? 'اتصرف' : 'حان موعد القبض'}<//>`}
+          ${res && res.status !== 'open' && html`<${Pill} tone="slate" icon="lock">${res.status === 'paid' ? 'اتصرف' : 'مقفول'}<//>`}</div>
+      </div>
+      ${prevDue && html`<a class="note warn" href="#salary" onClick=${() => setMonth(addMonths(cur, -1))}><b>مرتب ${monthShort(addMonths(cur, -1))} لسه ما اتصرفش</b><br />${fmtMoney(prev.calc.net)} ج.م · القبض ${fmtShort(keyToDate(paydayOf(addMonths(cur, -1), me)))}</a>`}
+      <${MonthChips} month=${month} setMonth=${setMonth} />
+      ${c ? html`<${PayBreakdown} c=${c} />` : html`<div class="card"><div class="empty">لحظة...</div></div>`}
+      <div class="card tight">
+        <div class="h2" style="padding:12px 0 4px">المكافآت والخصومات</div>
+        ${adjs.length === 0 ? html`<div class="empty">مفيش حاجة الشهر ده.</div>` : adjs.map((a) => html`<div class="list-row"><${Tile} icon=${a.kind === 'bonus' ? 'gift' : 'minus'} tone=${a.kind === 'bonus' ? 'green' : 'red'} sm />
+          <div class="grow"><div style="font-weight:500">${a.reason}</div><div class="soft">${fmtShort(keyToDate(a.effective_date))}</div></div>
+          <div class=${'amt ' + (a.kind === 'bonus' ? 'pos' : 'neg')}>${(a.kind === 'bonus' ? '+' : '−') + fmtMoney(a.amount)}</div></div>`)}
+      </div>
+      <div class="card tight">
+        <div class="h2" style="padding:12px 0 4px">سلفي</div>
+        ${advs.length === 0 ? html`<div class="empty">مفيش سلف.</div>` : advs.map((a) => html`<div class="list-row"><${Tile} icon="down" tone="slate" sm />
+          <div class="grow"><div style="font-weight:500">${fmtMoney(a.amount)} ج.م · ${a.installments} ${a.installments > 1 ? 'أقساط' : 'قسط'}</div>
+            <div class="soft">${a.status === 'approved' && a.start_month ? 'بتتخصم من ' + monthShort(a.start_month) : a.reason || ''}</div></div>
+          <${Pill} tone=${REQ_STATUS[a.status][0]}>${REQ_STATUS[a.status][1]}<//></div>`)}
+      </div>
+      <div class="card tight">
+        <div class="h2" style="padding:12px 0 4px">إجازاتي</div>
+        ${leaves.length === 0 ? html`<div class="empty">مفيش إجازات.</div>` : leaves.map((l) => html`<div class="list-row"><${Tile} icon="sun" tone="slate" sm />
+          <div class="grow"><div style="font-weight:500">${fmtShort(keyToDate(l.from_date))}${l.to_date !== l.from_date ? ' ← ' + fmtShort(keyToDate(l.to_date)) : ''}</div>
+            <div class="soft">${l.force_unpaid && l.status === 'approved' ? 'من غير أجر' : l.reason || ''}</div></div>
+          <${Pill} tone=${REQ_STATUS[l.status][0]}>${REQ_STATUS[l.status][1]}<//></div>`)}
+      </div>
+    </div>
+  </div>`;
+}
+
+function LeaveSheet({ onClose, onDone }) {
+  const [from, setFrom] = useState(todayKey());
+  const [to, setTo] = useState(todayKey());
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  async function send() {
+    setBusy(true);
+    const { error } = await sb.rpc('request_leave', { p_from: from, p_to: to < from ? from : to, p_reason: reason });
+    setBusy(false);
+    if (error) return toast(errText(error.message), 'bad');
+    toast('اتبعت طلب الإجازة');
+    onDone();
+  }
+  return html`<${Sheet} title="طلب إجازة" onClose=${onClose}>
+    <label class="field">من يوم<input class="input" type="date" value=${from} onInput=${(e) => { setFrom(e.target.value); if (to < e.target.value) setTo(e.target.value); }} /></label>
+    <label class="field">إلى يوم<input class="input" type="date" value=${to} min=${from} onInput=${(e) => setTo(e.target.value)} /></label>
+    <label class="field">السبب (اختياري)<input class="input" value=${reason} onInput=${(e) => setReason(e.target.value)} /></label>
+    <div class="note info">أول ${CTX.S.paid_leave_days ?? 2} يوم في الشهر بيتحسبوا بأجر، وباقي الأيام حسب قرار الإدارة.</div>
+    <button class="btn" disabled=${busy} onClick=${send}>${busy ? 'لحظة...' : 'إرسال الطلب'}</button>
+  <//>`;
+}
+
+function AdvanceSheet({ onClose, onDone }) {
+  const { me, S } = CTX;
+  const maxAmount = Math.floor((Number(me.base_salary) * Number(S.advance_max_pct ?? 50)) / 100);
+  const maxInst = Number(S.advance_max_installments ?? 3);
+  const [amount, setAmount] = useState('');
+  const [inst, setInst] = useState(1);
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  async function send() {
+    if (!Number(amount)) return toast('اكتب المبلغ.', 'bad');
+    setBusy(true);
+    const { error } = await sb.rpc('request_advance', { p_amount: Number(amount), p_installments: inst, p_reason: reason });
+    setBusy(false);
+    if (error) return toast(errText(error.message), 'bad');
+    toast('اتبعت طلب السلفة');
+    onDone();
+  }
+  return html`<${Sheet} title="طلب سلفة" onClose=${onClose}>
+    <label class="field">المبلغ (ج.م)<input class="input num-in" inputmode="decimal" value=${amount} placeholder=${'لحد ' + maxAmount} onInput=${(e) => setAmount(e.target.value.replace(/[^\d.]/g, ''))} />
+      <span class="hint">أقصى مبلغ ليك ${maxAmount} ج.م</span></label>
+    <div class="spread"><div><div class="h3">عدد الأقساط</div><div class="soft">بتتخصم من المرتب على شهور</div></div><${Stepper} value=${inst} min=${1} max=${maxInst} onChange=${setInst} /></div>
+    ${Number(amount) > 0 && html`<div class="note info">القسط الشهري حوالي ${fmtMoney(Number(amount) / inst)} ج.م</div>`}
+    <label class="field">السبب (اختياري)<input class="input" value=${reason} onInput=${(e) => setReason(e.target.value)} /></label>
+    <button class="btn" disabled=${busy} onClick=${send}>${busy ? 'لحظة...' : 'إرسال الطلب'}</button>
+  <//>`;
+}
+
+function EmpRequests() {
+  const { me } = CTX;
+  const [leaves, setLeaves] = useState(null);
+  const [advs, setAdvs] = useState(null);
+  const [sheet, setSheet] = useState(null);
+  async function load() {
+    const [a, b] = await Promise.all([
+      sb.from('leaves').select('*').eq('staff_id', me.id).order('created_at', { ascending: false }).limit(30),
+      sb.from('advances').select('*').eq('staff_id', me.id).order('created_at', { ascending: false }).limit(30),
+    ]);
+    setLeaves(a.data || []); setAdvs(b.data || []);
+  }
+  useEffect(() => { load(); }, []);
+  async function cancel(kind, id) {
+    if (!confirm('إلغاء الطلب؟')) return;
+    const { error } = await sb.rpc('cancel_request', { p_kind: kind, p_id: id });
+    if (error) return toast(errText(error.message), 'bad');
+    toast('اتلغى الطلب');
+    load();
+  }
+  const items = leaves && advs ? [...leaves.map((x) => ({ ...x, kind: 'leave' })), ...advs.map((x) => ({ ...x, kind: 'advance' }))].sort((a, b) => (a.created_at < b.created_at ? 1 : -1)) : null;
+  return html`<div class="page">
+    <${Hero} title="طلباتي" sub="إجازات وسلف" />
+    <div class="body">
+      <div class="row">
+        <button class="btn ghost grow" onClick=${() => setSheet('leave')}><${Icon} name="sun" size=${20} /> طلب إجازة</button>
+        <button class="btn ghost grow" onClick=${() => setSheet('advance')}><${Icon} name="down" size=${20} /> طلب سلفة</button>
+      </div>
+      <div class="card tight">
+        ${items === null ? html`<div class="empty">لحظة...</div>` : items.length === 0 ? html`<div class="empty">لسه ماعملتش أي طلب.</div>` : items.map((r) => html`<div class="list-row" style="align-items:flex-start;padding:12px 0">
+          <${Tile} icon=${r.kind === 'leave' ? 'sun' : 'down'} tone="slate" sm />
+          <div class="grow"><div style="font-weight:600">${r.kind === 'leave' ? 'إجازة' : 'سلفة ' + fmtMoney(r.amount) + ' ج.م'}</div>
+            <div class="soft">${r.kind === 'leave' ? fmtShort(keyToDate(r.from_date)) + (r.to_date !== r.from_date ? ' ← ' + fmtShort(keyToDate(r.to_date)) : '') : r.installments + ' ' + (r.installments > 1 ? 'أقساط' : 'قسط')}</div>
+            ${r.reason && html`<div class="soft">${r.reason}</div>`}
+            ${r.decision_note && html`<div class="soft">رد الإدارة: ${r.decision_note}</div>`}</div>
+          <div class="stack" style="align-items:flex-end"><${Pill} tone=${REQ_STATUS[r.status][0]}>${REQ_STATUS[r.status][1]}<//>
+            ${r.status === 'pending' && html`<button class="linkbtn" onClick=${() => cancel(r.kind, r.id)}>إلغاء</button>`}</div>
+        </div>`)}
+      </div>
+    </div>
+    ${sheet === 'leave' && html`<${LeaveSheet} onClose=${() => setSheet(null)} onDone=${() => { setSheet(null); load(); }} />`}
+    ${sheet === 'advance' && html`<${AdvanceSheet} onClose=${() => setSheet(null)} onDone=${() => { setSheet(null); load(); }} />`}
+  </div>`;
+}
+
 const EMP_NAV = [
   { id: 'home', icon: 'home', label: 'الرئيسية' },
   { id: 'history', icon: 'calendar', label: 'الحضور' },
@@ -400,13 +646,30 @@ const EMP_NAV = [
 ];
 
 function EmployeeShell({ route }) {
-  const tab = EMP_NAV.some((n) => n.id === route) ? route : 'home';
-  const view = { home: EmpHome, history: EmpHistory, profile: Profile }[tab];
-  return html`<div style="height:100%">
-    ${view ? html`<${view} key=${tab} />` : html`<${Soon} title=${tab === 'salary' ? 'مرتبي' : 'طلباتي'} text=${tab === 'salary' ? 'رصيدك بالساعة ومرتبك هيظهروا هنا في التحديث الجاي.' : 'طلبات الإجازة والسلف هتظهر هنا في التحديث الجاي.'} />`}
-    <${Nav} items=${EMP_NAV} tab=${tab} />
-  </div>`;
+  const { me } = CTX;
+  const [unread, setUnread] = useState(0);
+  const tab = EMP_NAV.some((n) => n.id === route) ? route : route === 'notifications' ? 'home' : 'home';
+  async function loadUnread() {
+    const { data } = await sb.from('notifications').select('id,read_by').order('created_at', { ascending: false }).limit(60);
+    setUnread((data || []).filter((n) => !(n.read_by || []).includes(me.id)).length);
+  }
+  useEffect(() => {
+    loadUnread();
+    const ch = sb.channel('emp-live')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'notifications' }, (p) => {
+        if (p.new.to_staff !== me.id) return;
+        toast((p.new.title || 'إشعار') + ': ' + (p.new.body || ''));
+        loadUnread();
+        window.dispatchEvent(new Event('adm-refresh'));
+      })
+      .subscribe();
+    return () => { sb.removeChannel(ch); };
+  }, []);
+  if (route === 'notifications') return html`<div style="height:100%"><${Notifications} home="home" onRead=${loadUnread} /></div>`;
+  const view = { home: html`<${EmpHome} unread=${unread} />`, history: html`<${EmpHistory} />`, salary: html`<${EmpSalary} />`, requests: html`<${EmpRequests} />`, profile: html`<${Profile} />` }[tab];
+  return html`<div style="height:100%">${view}<${Nav} items=${EMP_NAV} tab=${tab} /></div>`;
 }
+
 
 /* ================= admin screens ================= */
 const STATUS = {
@@ -414,20 +677,28 @@ const STATUS = {
   late: { tone: 'amber', label: 'متأخر' },
   absent: { tone: 'red', label: 'غايب' },
   waiting: { tone: 'sand', label: 'لسه' },
+  leave: { tone: 'slate', label: 'إجازة' },
 };
 const ROLE_LABEL = { employee: 'موظف', manager: 'مدير', hr: 'موارد بشرية', accountant: 'محاسب', super_admin: 'مدير عام' };
 const randomPin = () => String(Math.floor(100000 + Math.random() * 900000));
 
+function Denied() {
+  return html`<div class="page"><${Hero} title="مش مسموح" slim /><div class="body flat"><div class="card"><div class="empty"><${Icon} name="lock" size=${24} /> <span>الدور بتاعك مالوش صلاحية الصفحة دي. اطلبها من المدير العام.</span></div></div></div></div>`;
+}
+
 function AdmDash({ unread }) {
   const [board, setBoard] = useState(null);
-  const [pending, setPending] = useState(0);
+  const [cnt, setCnt] = useState({ review: 0, leaves: 0, advances: 0 });
   async function load() {
-    const [b, p] = await Promise.all([
-      sb.rpc('today_board'),
-      sb.from('attendance').select('id', { count: 'exact', head: true }).eq('review', 'pending'),
+    const head = { count: 'exact', head: true };
+    const [b, p, l, a] = await Promise.all([
+      can('attendance.view') ? sb.rpc('today_board') : Promise.resolve({ data: [] }),
+      sb.from('attendance').select('id', head).eq('review', 'pending'),
+      sb.from('leaves').select('id', head).eq('status', 'pending'),
+      sb.from('advances').select('id', head).eq('status', 'pending'),
     ]);
     if (!b.error) setBoard(b.data || []);
-    setPending(p.count || 0);
+    setCnt({ review: p.count || 0, leaves: l.count || 0, advances: a.count || 0 });
   }
   useEffect(() => {
     load();
@@ -435,28 +706,31 @@ function AdmDash({ unread }) {
     window.addEventListener('adm-refresh', load);
     return () => { clearInterval(t); window.removeEventListener('adm-refresh', load); };
   }, []);
-  const c = { present: 0, late: 0, absent: 0, waiting: 0 };
+  const c = { present: 0, late: 0, absent: 0, waiting: 0, leave: 0 };
   (board || []).forEach((r) => { c[r.status] = (c[r.status] || 0) + 1; });
   const total = board ? board.length : 0;
+  const row = (href, icon, tone, label, n, tn) => html`<a class="list-row" href=${href}><${Tile} icon=${icon} tone=${tone} sm /><div class="grow" style="font-weight:500">${label}</div><${Pill} tone=${n ? tn : 'sand'}>${n}<//><${Chev} /></a>`;
   return html`<div class="page">
     <${Hero} title="أهلاً يا إدارة" sub=${fmtDay(new Date()) + (board ? ' · ' + total + ' موظف' : '')} bell=${html`<${Bell} count=${unread} />`} />
     <div class="body">
-      <div class="card">
+      ${can('attendance.view') && html`<div class="card">
         <div class="spread"><div class="h2">النهاردة</div><${Pill} icon="clock">محدّث الآن<//></div>
-        <div class="bar">${total ? ['present', 'late', 'absent'].map((k) => c[k] > 0 && html`<div style=${'flex:' + c[k] + ';background:' + (k === 'present' ? 'var(--green)' : k === 'late' ? '#E0A93D' : 'var(--red)')}></div>`) : ''}</div>
+        <div class="bar">${total ? ['present', 'late', 'absent', 'leave'].map((k) => c[k] > 0 && html`<div style=${'flex:' + c[k] + ';background:' + (k === 'present' ? 'var(--green)' : k === 'late' ? '#E0A93D' : k === 'leave' ? '#7C89A8' : 'var(--red)')}></div>`) : ''}</div>
         <div class="stats">
           <div class="stat"><span class="tile sm tone-green"><${Icon} name="check" size=${20} /></span><span class="big num">${c.present}</span><span class="soft">حاضر</span></div>
           <div class="stat"><span class="tile sm tone-amber"><${Icon} name="clock" size=${20} /></span><span class="big num">${c.late}</span><span class="soft">متأخر</span></div>
           <div class="stat"><span class="tile sm tone-red"><${Icon} name="xcircle" size=${20} /></span><span class="big num">${c.absent}</span><span class="soft">غايب</span></div>
-          <div class="stat"><span class="tile sm tone-sand"><${Icon} name="clock" size=${20} /></span><span class="big num">${c.waiting}</span><span class="soft">لسه</span></div>
+          <div class="stat"><span class="tile sm tone-slate"><${Icon} name="sun" size=${20} /></span><span class="big num">${c.leave}</span><span class="soft">إجازة</span></div>
         </div>
-      </div>
+      </div>`}
       <div class="card tight">
         <div class="h2" style="padding:12px 0 4px">محتاج قرارك</div>
-        <a class="list-row" href="#att"><${Tile} icon="auto" tone="sand" sm /><div class="grow" style="font-weight:500">انصراف تلقائي للمراجعة</div><${Pill} tone=${pending ? 'amber' : 'sand'}>${pending}<//><${Chev} /></a>
-        <a class="list-row" href="#notifications"><${Tile} icon="bell" tone="slate" sm /><div class="grow" style="font-weight:500">إشعارات جديدة</div><${Pill} tone=${unread ? 'red' : 'sand'}>${unread}<//><${Chev} /></a>
+        ${can('leaves.decide') && row('#requests', 'sun', 'slate', 'طلبات الإجازة', cnt.leaves, 'amber')}
+        ${can('advances.decide') && row('#requests/advances', 'down', 'amber', 'طلبات السلف', cnt.advances, 'amber')}
+        ${can('attendance.view') && row('#att', 'auto', 'sand', 'انصراف تلقائي للمراجعة', cnt.review, 'amber')}
+        ${row('#notifications', 'bell', 'slate', 'إشعارات جديدة', unread, 'red')}
       </div>
-      <div class="card tight">
+      ${can('attendance.view') && html`<div class="card tight">
         <div class="h2" style="padding:12px 0 4px">حضور اليوم</div>
         ${board === null ? html`<div class="empty">لحظة...</div>` : board.length === 0 ? html`<div class="empty">لسه مفيش موظفين. ضيف أول موظف من تبويب الموظفين.</div>` : board.map((r) => html`
           <a class="list-row" href=${'#employee/' + r.staff_id}>
@@ -465,7 +739,313 @@ function AdmDash({ unread }) {
               <div class="soft num">${r.check_in ? 'حضور ' + fmtTime(r.check_in) + (r.check_out ? ' · انصراف ' + fmtTime(r.check_out) : '') : 'كود ' + r.code}</div></div>
             <${Pill} tone=${STATUS[r.status].tone}>${STATUS[r.status].label}<//>
           </a>`)}
+      </div>`}
+    </div>
+  </div>`;
+}
+
+/* ---------- requests (leaves + advances) ---------- */
+function DecideSheet({ kind, item, approve, onClose, onDone }) {
+  const [note, setNote] = useState('');
+  const [unpaid, setUnpaid] = useState(false);
+  const [inst, setInst] = useState(item.installments || 1);
+  const cur = monthStart(todayKey());
+  const [start, setStart] = useState(cur);
+  const [busy, setBusy] = useState(false);
+  async function go() {
+    setBusy(true);
+    const { error } = kind === 'leave'
+      ? await sb.rpc('decide_leave', { p_id: item.id, p_approve: approve, p_note: note, p_force_unpaid: unpaid })
+      : await sb.rpc('decide_advance', { p_id: item.id, p_approve: approve, p_note: note, p_installments: inst, p_start: start });
+    setBusy(false);
+    if (error) return toast(errText(error.message), 'bad');
+    toast(approve ? 'اتقبل الطلب' : 'اترفض الطلب');
+    onDone();
+  }
+  const who = item.staff ? item.staff.full_name : '';
+  return html`<${Sheet} title=${(approve ? 'قبول' : 'رفض') + (kind === 'leave' ? ' إجازة ' : ' سلفة ') + who} onClose=${onClose}>
+    ${kind === 'leave' && approve && html`<div class="row"><div class="grow"><div class="h3">من غير أجر</div><div class="soft">مش هيتحسب من الأيام المدفوعة</div></div><${Toggle} on=${unpaid} onChange=${setUnpaid} /></div>`}
+    ${kind === 'advance' && approve && html`
+      <div class="spread"><div><div class="h3">عدد الأقساط</div><div class="soft">القسط ${fmtMoney(Number(item.amount) / inst)} ج.م</div></div><${Stepper} value=${inst} min=${1} max=${24} onChange=${setInst} /></div>
+      <div><div class="h3" style="margin-bottom:8px">يبدأ الخصم من مرتب</div><div class="chips">
+        <button class=${'chip' + (start === cur ? ' on' : '')} onClick=${() => setStart(cur)}>${monthShort(cur)}</button>
+        <button class=${'chip' + (start === addMonths(cur, 1) ? ' on' : '')} onClick=${() => setStart(addMonths(cur, 1))}>${monthShort(addMonths(cur, 1))}</button></div></div>`}
+    <label class="field">ملاحظة للموظف (اختياري)<input class="input" value=${note} onInput=${(e) => setNote(e.target.value)} /></label>
+    <button class=${'btn' + (approve ? '' : ' dark')} disabled=${busy} onClick=${go}>${busy ? 'لحظة...' : approve ? 'تأكيد القبول' : 'تأكيد الرفض'}</button>
+  <//>`;
+}
+
+function AdmRequests({ tabInit }) {
+  const [tab, setTab] = useState(tabInit === 'advances' ? 'advances' : 'leaves');
+  const [rows, setRows] = useState(null);
+  const [dec, setDec] = useState(null);
+  async function load() {
+    const { data } = await sb.from(tab).select('*, staff(full_name, code)').order('created_at', { ascending: false }).limit(60);
+    setRows((data || []).sort((a, b) => (a.status === 'pending' ? 0 : 1) - (b.status === 'pending' ? 0 : 1)));
+  }
+  useEffect(() => { setRows(null); load(); window.addEventListener('adm-refresh', load); return () => window.removeEventListener('adm-refresh', load); }, [tab]);
+  const kind = tab === 'leaves' ? 'leave' : 'advance';
+  const allowed = can(kind === 'leave' ? 'leaves.decide' : 'advances.decide');
+  return html`<div class="page">
+    <${Hero} title="الطلبات" sub="إجازات وسلف الموظفين" back="dash" slim />
+    <div class="body flat">
+      <div class="chips"><button class=${'chip' + (tab === 'leaves' ? ' on' : '')} onClick=${() => setTab('leaves')}>الإجازات</button>
+        <button class=${'chip' + (tab === 'advances' ? ' on' : '')} onClick=${() => setTab('advances')}>السلف</button></div>
+      <div class="card tight">
+        ${rows === null ? html`<div class="empty">لحظة...</div>` : rows.length === 0 ? html`<div class="empty">مفيش طلبات.</div>` : rows.map((r) => html`<div class="list-row" style="align-items:flex-start;padding:12px 0">
+          <div class=${'avatar tone-' + REQ_STATUS[r.status][0]}>${initial(r.staff && r.staff.full_name)}</div>
+          <div class="grow"><div style="font-weight:600">${r.staff ? r.staff.full_name : ''}</div>
+            <div class="soft">${kind === 'leave' ? fmtShort(keyToDate(r.from_date)) + (r.to_date !== r.from_date ? ' ← ' + fmtShort(keyToDate(r.to_date)) : '') : fmtMoney(r.amount) + ' ج.م · ' + r.installments + ' ' + (r.installments > 1 ? 'أقساط' : 'قسط')}</div>
+            ${r.reason && html`<div class="soft">${r.reason}</div>`}
+            ${r.status === 'pending' && allowed && html`<div class="row" style="margin-top:8px"><button class="btn small" style="box-shadow:none" onClick=${() => setDec({ item: r, approve: true })}>قبول</button>
+              <button class="btn small ghost" onClick=${() => setDec({ item: r, approve: false })}>رفض</button></div>`}</div>
+          <${Pill} tone=${REQ_STATUS[r.status][0]}>${REQ_STATUS[r.status][1]}<//>
+        </div>`)}
       </div>
+    </div>
+    ${dec && html`<${DecideSheet} kind=${kind} item=${dec.item} approve=${dec.approve} onClose=${() => setDec(null)} onDone=${() => { setDec(null); load(); window.dispatchEvent(new Event('adm-refresh')); }} />`}
+  </div>`;
+}
+
+/* ---------- payroll ---------- */
+function MonthNav({ month, setMonth }) {
+  const cur = monthStart(todayKey());
+  return html`<div class="card"><div class="spread">
+    <button class="iconbtn light" aria-label="الشهر اللي بعده" disabled=${month >= cur} onClick=${() => setMonth(addMonths(month, 1))}><${Icon} name="chev" size=${22} /></button>
+    <div style="text-align:center"><div class="h2">${monthName(month)}</div>${month === cur && html`<span class="soft">الشهر الحالي</span>`}</div>
+    <button class="iconbtn light" aria-label="الشهر اللي قبله" onClick=${() => setMonth(addMonths(month, -1))}><${Icon} name="back" size=${22} /></button></div></div>`;
+}
+
+const PM_STATUS = { open: ['green', 'مفتوح'], locked: ['slate', 'مقفول'], paid: ['sand', 'اتصرف'] };
+
+function AdmPay() {
+  const [month, setMonth] = useState(monthStart(todayKey()));
+  const [rows, setRows] = useState(null);
+  const [pm, setPm] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [reopen, setReopen] = useState(false);
+  async function load() {
+    const [a, b] = await Promise.all([sb.rpc('payroll_month', { p_month: month }), sb.from('payroll_months').select('*').eq('month', month).maybeSingle()]);
+    if (a.error) { toast(errText(a.error.message), 'bad'); setRows([]); } else setRows(a.data || []);
+    setPm(b.data);
+  }
+  useEffect(() => { setRows(null); load(); const t = setInterval(load, 60000); return () => clearInterval(t); }, [month]);
+  const status = pm ? pm.status : 'open';
+  const cur = monthStart(todayKey());
+  const total = (rows || []).reduce((s, r) => s + Number(r.calc ? r.calc.net : 0), 0);
+  const hours = (rows || []).reduce((s, r) => s + Number(r.calc ? r.calc.hours_regular + r.calc.hours_overtime : 0), 0);
+  async function act(fn, ok, ask) {
+    if (ask && !confirm(ask)) return;
+    setBusy(true);
+    const { error } = await fn();
+    setBusy(false);
+    if (error) return toast(errText(error.message), 'bad');
+    toast(ok);
+    load();
+  }
+  const canEdit = can('payroll.edit');
+  return html`<div class="page">
+    <${Hero} title="المرتبات" sub=${'القبض ' + fmtShort(keyToDate(paydayOf(month)))} />
+    <div class="body">
+      <${MonthNav} month=${month} setMonth=${setMonth} />
+      <div class="card">
+        <div class="spread"><div><div class="soft">${status === 'open' && month === cur ? 'المستحق لحد دلوقتي' : 'إجمالي الصافي'}</div>
+          <div class="num" style="font-family:var(--hf);font-weight:600;font-size:30px">${fmtMoney(total)} <span class="soft" style="font-size:14px">ج.م</span></div></div>
+          <${Pill} tone=${PM_STATUS[status][0]} icon=${status === 'open' ? 'clock' : 'lock'}>${PM_STATUS[status][1]}<//></div>
+        <div class="spread soft"><span>${rows ? rows.length : 0} موظف</span><span>${hours} ساعة</span></div>
+        ${canEdit && status === 'open' && month < cur && html`<button class="btn small" disabled=${busy} onClick=${() => act(() => sb.rpc('lock_month', { p_month: month }), 'اتقفل الشهر', 'قفل شهر ' + monthName(month) + '؟ الأرقام هتتثبت.')}><${Icon} name="lock" size=${20} /> قفل الشهر</button>`}
+        ${canEdit && status === 'locked' && html`<button class="btn small" disabled=${busy} onClick=${() => act(() => sb.rpc('mark_paid', { p_month: month }), 'اتسجّل الصرف', 'تسجيل إن المرتبات اتصرفت؟ الموظفين هيوصلهم إشعار.')}><${Icon} name="check" size=${20} /> تم صرف المرتبات</button>`}
+        ${can('payroll.reopen') && status !== 'open' && html`<button class="btn ghost small" disabled=${busy} onClick=${() => setReopen(true)}>إعادة فتح الشهر</button>`}
+        ${status === 'open' && month >= cur && html`<div class="note info">الشهر لسه شغال. تقدر تقفله أول ما يخلص.</div>`}
+      </div>
+      <div class="card tight">
+        ${rows === null ? html`<div class="empty">لحظة...</div>` : rows.length === 0 ? html`<div class="empty">مفيش موظفين.</div>` : rows.map((r) => html`<a class="list-row" href=${'#payroll/' + r.staff_id + '/' + month}>
+          <div class="avatar tone-sand">${initial(r.full_name)}</div>
+          <div class="grow"><div style="font-weight:600">${r.full_name}</div><div class="soft num">${r.calc ? r.calc.hours_regular + r.calc.hours_overtime + ' ساعة' : ''}</div></div>
+          <div class="amt">${r.calc ? fmtMoney(r.calc.net) : '—'}</div><${Chev} /></a>`)}
+      </div>
+    </div>
+    ${reopen && html`<${ReopenSheet} month=${month} onClose=${() => setReopen(false)} onDone=${() => { setReopen(false); load(); }} />`}
+  </div>`;
+}
+
+function ReopenSheet({ month, onClose, onDone }) {
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  async function go() {
+    setBusy(true);
+    const { error } = await sb.rpc('reopen_month', { p_month: month, p_reason: reason });
+    setBusy(false);
+    if (error) return toast(errText(error.message), 'bad');
+    toast('اتفتح الشهر');
+    onDone();
+  }
+  return html`<${Sheet} title=${'إعادة فتح ' + monthName(month)} onClose=${onClose}>
+    <div class="note warn">الأرقام المثبّتة هتتمسح وهتتحسب من جديد. الإجراء ده بيتسجّل في سجل النشاط.</div>
+    <label class="field">سبب إعادة الفتح<input class="input" value=${reason} onInput=${(e) => setReason(e.target.value)} /></label>
+    <button class="btn dark" disabled=${busy} onClick=${go}>تأكيد إعادة الفتح</button>
+  <//>`;
+}
+
+function AdjSheet({ staffId, kind, month, onClose, onDone }) {
+  const last = addMonths(month, 1);
+  const lastDay = addDays(last, -1);
+  const [k, setK] = useState(kind);
+  const [amount, setAmount] = useState('');
+  const [reason, setReason] = useState('');
+  const [date, setDate] = useState(todayKey() < lastDay && todayKey() >= month ? todayKey() : lastDay);
+  const [busy, setBusy] = useState(false);
+  async function go() {
+    if (!Number(amount)) return toast('اكتب المبلغ.', 'bad');
+    setBusy(true);
+    const { error } = await sb.rpc('add_adjustment', { p_staff: staffId, p_kind: k, p_amount: Number(amount), p_reason: reason, p_date: date });
+    setBusy(false);
+    if (error) return toast(errText(error.message), 'bad');
+    toast(k === 'bonus' ? 'اتضافت المكافأة' : 'اتضاف الخصم');
+    onDone();
+  }
+  return html`<${Sheet} title="مكافأة أو خصم" onClose=${onClose}>
+    <div class="chips"><button class=${'chip' + (k === 'bonus' ? ' on' : '')} onClick=${() => setK('bonus')}>مكافأة</button><button class=${'chip' + (k === 'deduction' ? ' on' : '')} onClick=${() => setK('deduction')}>خصم</button></div>
+    <label class="field">المبلغ (ج.م)<input class="input num-in" inputmode="decimal" value=${amount} onInput=${(e) => setAmount(e.target.value.replace(/[^\d.]/g, ''))} /></label>
+    <label class="field">السبب<input class="input" placeholder=${k === 'bonus' ? 'مثال: أداء ممتاز' : 'مثال: تلف عدة'} value=${reason} onInput=${(e) => setReason(e.target.value)} /></label>
+    <label class="field">التاريخ<input class="input" type="date" value=${date} min=${month} max=${lastDay} onInput=${(e) => setDate(e.target.value)} /></label>
+    <div class="note info">الموظف هيوصله إشعار، وبيظهر في مرتب ${monthName(month)}.</div>
+    <button class="btn" disabled=${busy} onClick=${go}>${busy ? 'لحظة...' : 'إضافة'}</button>
+  <//>`;
+}
+
+function AdmPayroll({ id, month }) {
+  const m = month ? monthStart(month) : monthStart(todayKey());
+  const [s, setS] = useState(null);
+  const [res, setRes] = useState(null);
+  const [adjs, setAdjs] = useState([]);
+  const [sheet, setSheet] = useState(null);
+  async function load() {
+    const [a, b, c] = await Promise.all([
+      sb.from('staff').select('*').eq('id', id).maybeSingle(),
+      sb.rpc('staff_payroll', { p_staff: id, p_month: m }),
+      sb.from('pay_adjustments').select('*').eq('staff_id', id).gte('effective_date', m).lt('effective_date', addMonths(m, 1)).order('effective_date', { ascending: false }),
+    ]);
+    setS(a.data);
+    if (b.error) toast(errText(b.error.message), 'bad'); else setRes(b.data);
+    setAdjs(c.data || []);
+  }
+  useEffect(() => { load(); }, [id, m]);
+  async function voidAdj(a) {
+    const reason = prompt('سبب الإلغاء؟');
+    if (!reason) return;
+    const { error } = await sb.rpc('void_adjustment', { p_id: a.id, p_reason: reason });
+    if (error) return toast(errText(error.message), 'bad');
+    toast('اتلغى');
+    load();
+  }
+  const c = res && res.calc;
+  const open = res && res.status === 'open';
+  return html`<div class="page nonav">
+    <${Hero} title=${s ? s.full_name : 'المرتب'} sub=${monthName(m) + (res && res.status !== 'open' ? ' · ' + PM_STATUS[res.status][1] : '')} back=${'pay'} slim />
+    <div class="body flat">
+      <div class="card" style="align-items:center;text-align:center;gap:4px"><div class="soft">صافي المرتب</div>
+        <div class="num" style="font-family:var(--hf);font-weight:600;font-size:40px">${c ? fmtMoney(c.net) : '...'} <span class="soft" style="font-size:16px">ج.م</span></div>
+        ${s && html`<div class="soft">المرتب الأساسي ${fmtMoney(s.base_salary)} · القبض ${fmtShort(keyToDate(paydayOf(m, s)))}</div>`}</div>
+      ${c && html`<${PayBreakdown} c=${c} />`}
+      ${c && html`<div class="stats"><div class="stat"><span class="big num">${c.days_present}</span><span class="soft">أيام حضور</span></div>
+        <div class="stat"><span class="big num">${c.late_days}</span><span class="soft">تأخير</span></div>
+        <div class="stat"><span class="big num">${c.days_absent}</span><span class="soft">غياب</span></div></div>`}
+      ${can('payroll.edit') && open && html`<div class="row"><button class="btn small grow" style="box-shadow:none" onClick=${() => setSheet('bonus')}><${Icon} name="gift" size=${20} /> مكافأة</button>
+        <button class="btn small ghost grow" onClick=${() => setSheet('deduction')}><${Icon} name="minus" size=${20} /> خصم</button></div>
+        <a class="btn ghost small" href=${'#backfill/' + id + '/' + m}><${Icon} name="calendar" size=${20} /> إدخال أيام سابقة</a>`}
+      <div class="card tight">
+        <div class="h2" style="padding:12px 0 4px">المكافآت والخصومات</div>
+        ${adjs.length === 0 ? html`<div class="empty">مفيش حاجة الشهر ده.</div>` : adjs.map((a) => html`<div class="list-row" style=${a.voided ? 'opacity:.5' : ''}>
+          <${Tile} icon=${a.kind === 'bonus' ? 'gift' : 'minus'} tone=${a.kind === 'bonus' ? 'green' : 'red'} sm />
+          <div class="grow"><div style="font-weight:500">${a.reason}${a.voided ? ' (ملغي)' : ''}</div><div class="soft">${fmtShort(keyToDate(a.effective_date))}</div></div>
+          <div class=${'amt ' + (a.kind === 'bonus' ? 'pos' : 'neg')}>${(a.kind === 'bonus' ? '+' : '−') + fmtMoney(a.amount)}</div>
+          ${!a.voided && open && can('payroll.edit') && html`<button class="iconbtn light" aria-label="إلغاء" onClick=${() => voidAdj(a)}><${Icon} name="close" size=${18} /></button>`}</div>`)}
+      </div>
+    </div>
+    ${sheet && html`<${AdjSheet} staffId=${id} kind=${sheet} month=${m} onClose=${() => setSheet(null)} onDone=${() => { setSheet(null); load(); }} />`}
+  </div>`;
+}
+
+/* ---------- days entered by hand (first month, before the app was used) ---------- */
+const NEXT_STATE = { none: 'present', present: 'absent', absent: 'leave', leave: 'none' };
+function Backfill({ id, month }) {
+  const m = month ? monthStart(month) : monthStart(todayKey());
+  const [s, setS] = useState(null);
+  const [sh, setSh] = useState(null);
+  const [app, setApp] = useState({});
+  const [cells, setCells] = useState({});
+  const [hours, setHours] = useState(8);
+  const [ot, setOt] = useState(0);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    (async () => {
+      const [a, at, md] = await Promise.all([
+        sb.from('staff').select('*').eq('id', id).maybeSingle(),
+        sb.from('attendance').select('work_date').eq('staff_id', id).gte('work_date', m).lt('work_date', addMonths(m, 1)),
+        sb.from('manual_days').select('*').eq('staff_id', id).gte('work_date', m).lt('work_date', addMonths(m, 1)),
+      ]);
+      setS(a.data);
+      if (a.data && a.data.shift_id) { const r = await sb.from('shifts').select('*').eq('id', a.data.shift_id).maybeSingle(); setSh(r.data); setHours(r.data ? Number(r.data.hours) : 8); }
+      const ap = {}; (at.data || []).forEach((x) => { ap[x.work_date] = true; }); setApp(ap);
+      const cs = {}; let o = 0; let h = null;
+      (md.data || []).forEach((x) => { cs[x.work_date] = x.kind; o += Number(x.overtime_hours || 0); if (x.kind === 'present' && x.hours != null && h == null) h = Number(x.hours); });
+      setCells(cs); setOt(o); if (h != null) setHours(h);
+    })();
+  }, [id, m]);
+  if (!s) return html`<div class="page nonav"><${Hero} title="أيام سابقة" back=${'employee/' + id} slim /><div class="body flat"><div class="card"><div class="empty">لحظة...</div></div></div></div>`;
+  const dim = daysInMonth(m);
+  const first = (keyToDate(m).getUTCDay() + 1) % 7;
+  const today = todayKey();
+  const keyOf = (d) => m.slice(0, 8) + pad2(d);
+  const cnt = { present: 0, absent: 0, leave: 0 };
+  Object.entries(cells).forEach(([k, v]) => { if (!app[k] && cnt[v] != null) cnt[v] += 1; });
+  const shiftH = sh ? Number(sh.hours) : 8;
+  const rate = Number(s.base_salary) / dim / shiftH;
+  const allowance = Number(CTX.S.paid_leave_days ?? 2);
+  const est = (cnt.present * hours + ot * (Number(CTX.S.overtime_pct ?? 150) / 100)) * rate + Math.min(cnt.leave, allowance) * shiftH * rate;
+  const style = { present: 'background:var(--green-bg);color:var(--green)', absent: 'background:var(--red-bg);color:var(--red-fg)', leave: 'background:var(--slate-bg);color:var(--slate)', none: 'background:#fff;color:var(--ink);border:1px dashed var(--line)' };
+  async function save() {
+    const firstPresent = Object.keys(cells).filter((k) => cells[k] === 'present' && !app[k]).sort()[0];
+    const rows = Object.keys(cells).filter((k) => !app[k] && cells[k] !== 'none').map((k) => ({ work_date: k, kind: cells[k], hours: cells[k] === 'present' ? hours : null, overtime_hours: k === firstPresent ? ot : 0 }));
+    setBusy(true);
+    const { error } = await sb.rpc('save_manual_days', { p_staff: id, p_from: m, p_to: addDays(addMonths(m, 1), -1), p_rows: rows });
+    setBusy(false);
+    if (error) return toast(errText(error.message), 'bad');
+    toast('اتحفظت الأيام');
+    location.hash = '#payroll/' + id + '/' + m;
+  }
+  const days = [];
+  for (let i = 0; i < first; i++) days.push(html`<span></span>`);
+  for (let d = 1; d <= dim; d++) {
+    const k = keyOf(d);
+    const future = k > today;
+    const fromApp = app[k];
+    days.push(html`<button type="button" class="cal-d" disabled=${future || fromApp}
+      style=${(fromApp ? 'background:var(--green-bg);color:var(--green);opacity:.6' : future ? 'background:transparent;color:#B5B0B8' : style[cells[k] || 'none'])}
+      onClick=${() => setCells({ ...cells, [k]: NEXT_STATE[cells[k] || 'none'] })}>${d}</button>`);
+  }
+  return html`<div class="page nonav">
+    <${Hero} title="إدخال أيام سابقة" sub=${s.full_name + ' · ' + monthName(m)} back=${'employee/' + id} slim />
+    <div class="body flat">
+      <div class="note info">دوس على اليوم يتغيّر: حاضر، ثم غايب، ثم إجازة مدفوعة، ثم فاضي. الأيام اللي التطبيق سجّلها لوحده مش بتتعدّل.</div>
+      <div class="card">
+        <div class="cal">${['سبت', 'أحد', 'إثنين', 'ثلاثاء', 'أربعاء', 'خميس', 'جمعة'].map((d) => html`<div class="soft" style="text-align:center;font-size:12px">${d}</div>`)}</div>
+        <div class="cal">${days}</div>
+        <div class="chips" style="gap:12px"><span class="pill tone-green">حاضر</span><span class="pill tone-red">غايب</span><span class="pill tone-slate">إجازة</span><span class="pill" style="background:#fff;border:1px dashed var(--line)">فاضي</span></div>
+      </div>
+      <div class="card">
+        <div class="spread"><div><div class="h3">ساعات اليوم</div><div class="soft">بتتطبق على كل يوم حاضر</div></div><${Stepper} value=${hours} min=${1} max=${24} step=${0.5} onChange=${setHours} /></div>
+        <div class="spread"><div><div class="h3">ساعات إضافية</div><div class="soft">إجمالي الشهر</div></div><${Stepper} value=${ot} min=${0} max=${300} step=${1} onChange=${setOt} /></div>
+      </div>
+      <div class="card">
+        <div class="h2">ملخص الأيام دي</div>
+        <div class="spread"><span class="soft">حاضر</span><b class="num">${cnt.present} يوم · ${cnt.present * hours} ساعة</b></div>
+        <div class="spread"><span class="soft">إجازة مدفوعة</span><b class="num">${cnt.leave} يوم</b></div>
+        <div class="spread"><span class="soft">غايب</span><b class="num">${cnt.absent} يوم</b></div>
+        <div class="spread" style="border-top:1px solid var(--line);padding-top:10px"><span class="h3">تقدير المستحق</span><b class="amt" style="font-size:20px">${fmtMoney(est)} ج.م</b></div>
+      </div>
+      <button class="btn" disabled=${busy || !can('payroll.edit')} onClick=${save}>${busy ? 'لحظة...' : 'حفظ الأيام'}</button>
     </div>
   </div>`;
 }
@@ -530,7 +1110,7 @@ function Credentials({ name, code, pin, phone, onClose, extra }) {
 }
 
 function AdmAdd() {
-  const [f, setF] = useState({ name: '', phone: '', dept: '', job: '', salary: '', shift: '', start: todayKey(), code: '', pin: randomPin(), anyLoc: false });
+  const [f, setF] = useState({ name: '', phone: '', dept: '', job: '', salary: '', shift: '', start: todayKey(), code: '', pin: randomPin(), anyLoc: false, role: 'employee' });
   const [shifts, setShifts] = useState([]);
   const [depts, setDepts] = useState([]);
   const [busy, setBusy] = useState(false);
@@ -556,7 +1136,7 @@ function AdmAdd() {
     setBusy(true);
     try {
       const r = await callAdmin({ action: 'create', code: f.code, pin: f.pin, full_name: f.name, phone: f.phone, department: f.dept, job_title: f.job,
-        base_salary: Number(f.salary || 0), shift_id: f.shift || null, start_date: f.start || null, any_location: f.anyLoc });
+        base_salary: Number(f.salary || 0), shift_id: f.shift || null, start_date: f.start || null, any_location: f.anyLoc, role: f.role });
       setDone({ id: r.id, code: r.code, pin: f.pin, name: f.name.trim(), phone: f.phone });
     } catch (e) { toast(errText(e.message), 'bad'); }
     setBusy(false);
@@ -582,6 +1162,8 @@ function AdmAdd() {
           <span class="hint">الموظف يقدر يغيّره بنفسه من صفحة حسابي</span></label>`)}
       ${sec('pin', 'green', 'مكان التسجيل',
         html`<div class="row"><div class="grow"><div style="font-weight:600;color:var(--ink)">يسجّل من أي مكان</div><div class="soft">مقفول: لازم يكون داخل نطاق الشغل</div></div><${Toggle} on=${f.anyLoc} onChange=${(v) => set('anyLoc', v)} /></div>`)}
+      ${can('roles.manage') && html`<div class="card"><label class="field">الدور<select class="select" onChange=${(e) => set('role', e.target.value)}>${Object.entries(ROLE_LABEL).map(([k, v]) => html`<option value=${k} selected=${f.role === k}>${v}</option>`)}</select>
+        <span class="hint">اختار "موظف" للناس العادية. الأدوار التانية بتدخل لوحة الإدارة.</span></label></div>`}
       <button class="btn" disabled=${busy} onClick=${submit}>${busy ? 'لحظة...' : 'إضافة الموظف'}</button>
     </div>
     ${done && html`<${Credentials} ...${done} onClose=${() => { setDone(null); location.hash = '#employee/' + done.id; }} />`}
@@ -651,6 +1233,10 @@ function AdmEmployee({ id }) {
         <div class="row"><div class="grow"><div style="font-weight:600;color:var(--ink)">يسجّل من أي مكان</div><div class="soft">مقفول: لازم يكون داخل نطاق الشغل</div></div><${Toggle} on=${f.anyLoc} onChange=${(v) => set('anyLoc', v)} /></div>
         <button class="btn dark small" disabled=${busy} onClick=${save}>حفظ التعديلات</button>
       </div>
+      ${(can('payroll.view') || can('payroll.edit')) && html`<div class="card tight">
+        ${can('payroll.view') && html`<a class="list-row" href=${'#payroll/' + id + '/' + monthStart(todayKey())}><${Tile} icon="wallet" tone="green" sm /><div class="grow" style="font-weight:500">المرتب والمكافآت والخصومات</div><${Chev} /></a>`}
+        ${can('payroll.edit') && html`<a class="list-row" href=${'#backfill/' + id}><${Tile} icon="calendar" tone="sand" sm /><div class="grow" style="font-weight:500">إدخال أيام سابقة</div><${Chev} /></a>`}
+      </div>`}
       <div class="card">
         <div class="h2">آخر حضور</div>
         ${rows.length === 0 ? html`<div class="soft">لسه مفيش حضور.</div>` : rows.map((a) => html`<div class="list-row">
@@ -717,6 +1303,13 @@ function EditAtt({ a, onClose, onDone }) {
   const [cout, setCout] = useState(a.check_out ? toLocalInput(a.check_out) : '');
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
+  const [otOk, setOtOk] = useState(a.overtime_ok === true);
+  async function toggleOt(v) {
+    setOtOk(v);
+    const { error } = await sb.rpc('set_overtime_ok', { p_id: a.id, p_ok: v });
+    if (error) { setOtOk(!v); return toast(errText(error.message), 'bad'); }
+    toast(v ? 'اتعتمد الإضافي' : 'اتلغى اعتماد الإضافي');
+  }
   async function save() {
     if (!reason.trim()) return toast('اكتب سبب التعديل.', 'bad');
     setBusy(true);
@@ -739,6 +1332,7 @@ function EditAtt({ a, onClose, onDone }) {
     ${a.in_zone === false && html`<div class="note bad">الحضور اتسجّل وهو خارج النطاق (${Math.round(a.in_dist_m || 0)} متر).</div>`}
     <label class="field">وقت الحضور<input class="input" type="datetime-local" value=${cin} onInput=${(e) => setCin(e.target.value)} /></label>
     <label class="field">وقت الانصراف<input class="input" type="datetime-local" value=${cout} onInput=${(e) => setCout(e.target.value)} /></label>
+    ${CTX.S.overtime_requires_approval === true && html`<div class="row"><div class="grow"><div class="h3">اعتماد الساعات الإضافية</div><div class="soft">مش هتتحسب من غير اعتمادك</div></div><${Toggle} on=${otOk} onChange=${toggleOt} /></div>`}
     <label class="field">سبب التعديل<input class="input" placeholder="مثال: نسي يسجّل الانصراف" value=${reason} onInput=${(e) => setReason(e.target.value)} /></label>
     <button class="btn" disabled=${busy} onClick=${save}>حفظ التعديل</button>
     ${a.review === 'pending' && html`<button class="btn ghost" disabled=${busy} onClick=${approve}><${Icon} name="check" size=${20} /> اعتماد كما هو</button>`}
@@ -746,7 +1340,7 @@ function EditAtt({ a, onClose, onDone }) {
   <//>`;
 }
 
-function Notifications({ onRead }) {
+function Notifications({ onRead, home }) {
   const { me } = CTX;
   const [rows, setRows] = useState(null);
   async function load() {
@@ -755,16 +1349,20 @@ function Notifications({ onRead }) {
   }
   useEffect(() => { load(); window.addEventListener('adm-refresh', load); return () => window.removeEventListener('adm-refresh', load); }, []);
   async function readAll() { await sb.rpc('mark_notifications_read'); await load(); onRead(); }
-  const icon = { late: ['clock', 'amber'], auto_close: ['auto', 'slate'] };
+  const icon = { late: ['clock', 'amber'], auto_close: ['auto', 'slate'], leave_request: ['sun', 'slate'], advance_request: ['down', 'amber'],
+    leave_decision: ['sun', 'green'], advance_decision: ['down', 'green'], adjustment: ['wallet', 'green'], paid: ['wallet', 'green'] };
+  const target = (n) => (home
+    ? (n.type === 'adjustment' || n.type === 'paid' ? '#salary' : '#requests')
+    : n.type === 'leave_request' ? '#requests' : n.type === 'advance_request' ? '#requests/advances' : n.data && n.data.attendance_id ? '#att' : '#notifications');
   return html`<div class="page">
-    <${Hero} title="الإشعارات" back="dash" slim />
+    <${Hero} title="الإشعارات" back=${home || 'dash'} slim />
     <div class="body flat">
       <button class="btn ghost small" onClick=${readAll}><${Icon} name="check" size=${20} /> تعليم الكل كمقروء</button>
       <div class="card tight">
         ${rows === null ? html`<div class="empty">لحظة...</div>` : rows.length === 0 ? html`<div class="empty">مفيش إشعارات.</div>` : rows.map((n) => {
           const [ic, tn] = icon[n.type] || ['bell', 'sand'];
           const unread = !(n.read_by || []).includes(me.id);
-          return html`<a class="list-row" href=${n.data && n.data.attendance_id ? '#att' : '#notifications'}>
+          return html`<a class="list-row" href=${target(n)}>
             <${Tile} icon=${ic} tone=${tn} sm />
             <div class="grow"><div style=${'font-weight:' + (unread ? 700 : 500)}>${n.title}</div><div class="soft">${n.body}</div></div>
             <div class="stack" style="align-items:flex-end;gap:4px"><span class="soft num">${fmtTime(n.created_at)}</span>${unread && html`<${Pill} tone="red">جديد<//>`}</div></a>`;
@@ -778,29 +1376,27 @@ function Notifications({ onRead }) {
 const reloadSettings = () => window.dispatchEvent(new Event('reload-settings'));
 
 function SetHub() {
-  const item = (icon, tone, title, inside, href) => href
-    ? html`<a class="list-row" href=${href}><${Tile} icon=${icon} tone=${tone} /><div class="grow"><div style="font-weight:600;font-size:15.5px">${title}</div><div class="soft">${inside}</div></div><${Chev} /></a>`
-    : html`<div class="list-row" style="opacity:.6"><${Tile} icon=${icon} tone=${tone} /><div class="grow"><div style="font-weight:600;font-size:15.5px">${title}</div><div class="soft">${inside}</div></div><${Pill}>قريبًا<//></div>`;
+  const item = (icon, tone, title, inside, href) => html`<a class="list-row" href=${href}><${Tile} icon=${icon} tone=${tone} /><div class="grow"><div style="font-weight:600;font-size:15.5px">${title}</div><div class="soft">${inside}</div></div><${Chev} /></a>`;
+  const ed = can('settings.edit');
   return html`<div class="page">
     <${Hero} title="الإعدادات" sub="كل حاجة في النظام بتتغير من هنا" />
     <div class="body">
       <div class="note info"><b>التغييرات المالية بتسري من تاريخ تحدده</b><br />وأي شهر اتقفل مابيتغيرش، وكل تغيير بيتسجّل في سجل النشاط.</div>
-      <div class="card tight">
+      ${ed && html`<div class="card tight">
         <div class="h2" style="padding:12px 0 4px">الحضور</div>
         ${item('pin', 'red', 'الموقع والنطاق', 'موقع الشغل · نطاق التسجيل · دقة الـ GPS', '#set/location')}
         ${item('clock', 'sand', 'الشفتات', 'الأسماء · مواعيد البداية · عدد الساعات', '#set/shifts')}
         ${item('auto', 'amber', 'قواعد الحضور', 'فترة السماح · الانصراف التلقائي · الإشعارات', '#set/rules')}
       </div>
       <div class="card tight">
-        <div class="h2" style="padding:12px 0 4px">قريبًا</div>
-        ${item('wallet', 'green', 'حساب المرتب', 'سعر الساعة · الساعة الإضافية · يوم القبض')}
-        ${item('sun', 'slate', 'الإجازات', 'الأيام المدفوعة · الموافقات')}
-        ${item('down', 'amber', 'السلف والخصومات', 'الحد الأقصى · طريقة السداد')}
-        ${item('shield', 'slate', 'الصلاحيات', 'الأدوار · مين يشوف إيه')}
-      </div>
+        <div class="h2" style="padding:12px 0 4px">المرتبات</div>
+        ${item('wallet', 'green', 'حساب المرتب', 'الساعة الإضافية · التأخير · يوم القبض', '#set/pay')}
+        ${item('sun', 'slate', 'الإجازات والسلف', 'الأيام المدفوعة · حدود السلف', '#set/leaves')}
+      </div>`}
       <div class="card tight">
         <div class="h2" style="padding:12px 0 4px">الأمان</div>
-        ${item('file', 'sand', 'سجل النشاط', 'مين غيّر إيه وإمتى', '#set/log')}
+        ${can('roles.manage') && item('shield', 'slate', 'الصلاحيات', 'الأدوار · مين يشوف ويعمل إيه', '#set/perm')}
+        ${can('log.view') && item('file', 'sand', 'سجل النشاط', 'مين غيّر إيه وإمتى', '#set/log')}
       </div>
       <button class="btn ghost" onClick=${() => sb.auth.signOut()}><${Icon} name="logout" size=${20} /> تسجيل الخروج</button>
     </div>
@@ -944,13 +1540,141 @@ function SetLog() {
   </div>`;
 }
 
+/* ---------- settings: pay, leaves + advances, permissions ---------- */
+function SetPay() {
+  const { S } = CTX;
+  const [f, setF] = useState({
+    ot: Number(S.overtime_pct ?? 150), otNeed: S.overtime_requires_approval === true, maxH: Number(S.max_hours_per_day ?? 14),
+    lateOn: S.late_extra_deduction_enabled === true, tiers: Array.isArray(S.late_tiers) ? S.late_tiers : [{ from: 31, to: 60, pct: 10 }, { from: 61, to: 120, pct: 25 }, { from: 121, to: 1440, pct: 50 }],
+    payday: Number(S.payday_day ?? 1),
+  });
+  const [busy, setBusy] = useState(false);
+  const set = (k, v) => setF((o) => ({ ...o, [k]: v }));
+  const setTier = (i, k, v) => set('tiers', f.tiers.map((t, x) => (x === i ? { ...t, [k]: Number(v) || 0 } : t)));
+  async function save() {
+    setBusy(true);
+    try {
+      await saveSettings({ overtime_pct: f.ot, overtime_requires_approval: f.otNeed, max_hours_per_day: f.maxH, late_extra_deduction_enabled: f.lateOn, late_tiers: f.tiers, payday_day: f.payday });
+      reloadSettings();
+      toast('اتحفظت قواعد المرتب. بتسري من النهارده.');
+    } catch (e) { toast(errText(e.message), 'bad'); }
+    setBusy(false);
+  }
+  const days = Array.from({ length: 28 }, (_, i) => i + 1);
+  const row = (t, d, ctrl) => html`<div class="row"><div class="grow"><div class="h3">${t}</div><div class="soft">${d}</div></div>${ctrl}</div>`;
+  return html`<div class="page nonav">
+    <${Hero} title="حساب المرتب" back="settings" slim />
+    <div class="body flat">
+      <div class="card">
+        <div class="row"><${Tile} icon="clock" tone="sand" sm /><div class="grow"><div class="h3">سعر الساعة</div><div class="soft">المرتب ÷ أيام الشهر ÷ ساعات الشفت. الرصيد بيزيد بالساعة الكاملة من وقت حضور الموظف.</div></div></div>
+        <div class="note info">مثال: 10,000 ÷ 30 ÷ 8 = ${fmtMoney(10000 / 30 / 8)} ج.م للساعة، والساعة الإضافية ${fmtMoney((10000 / 30 / 8) * f.ot / 100)} ج.م.</div>
+      </div>
+      <div class="card">
+        ${row('الساعة الإضافية', 'نسبة من سعر الساعة العادي', html`<${Stepper} value=${f.ot} min=${100} max=${300} step=${5} unit="٪" onChange=${(v) => set('ot', v)} />`)}
+        ${row('الإضافي بموافقتك', 'لو مفتوح، الساعات الزيادة مابتتحسبش غير لما تعتمدها من صفحة الحضور', html`<${Toggle} on=${f.otNeed} onChange=${(v) => set('otNeed', v)} />`)}
+        ${row('أقصى ساعات في اليوم', 'أي ساعات أكتر مابتتحسبش', html`<${Stepper} value=${f.maxH} min=${8} max=${24} onChange=${(v) => set('maxH', v)} />`)}
+      </div>
+      <div class="card">
+        ${row('خصم تأخير إضافي', 'مقفول: التأخير بيقلل الساعات أصلًا. فعّله لو عايز خصم زيادة بالشرائح.', html`<${Toggle} on=${f.lateOn} onChange=${(v) => set('lateOn', v)} />`)}
+        ${f.lateOn && html`<div class="stack">
+          <div class="soft">لو الموظف اتأخر من ... لحد ... دقيقة، يتخصم نسبة من يوم الشغل:</div>
+          ${f.tiers.map((t, i) => html`<div class="row"><label class="field grow">من (د)<input class="input num-in" inputmode="numeric" value=${t.from} onInput=${(e) => setTier(i, 'from', e.target.value)} /></label>
+            <label class="field grow">إلى (د)<input class="input num-in" inputmode="numeric" value=${t.to} onInput=${(e) => setTier(i, 'to', e.target.value)} /></label>
+            <label class="field grow">نسبة ٪<input class="input num-in" inputmode="numeric" value=${t.pct} onInput=${(e) => setTier(i, 'pct', e.target.value)} /></label>
+            <button class="iconbtn light" aria-label="حذف" style="margin-top:22px" onClick=${() => set('tiers', f.tiers.filter((_, x) => x !== i))}><${Icon} name="close" size=${18} /></button></div>`)}
+          <button class="btn ghost small" onClick=${() => set('tiers', [...f.tiers, { from: 0, to: 0, pct: 0 }])}><${Icon} name="plus" size=${20} /> شريحة جديدة</button></div>`}
+      </div>
+      <div class="card">
+        <div class="row"><${Tile} icon="calendar" tone="red" sm /><div class="grow"><div class="h3">يوم القبض</div><div class="soft">القبض دايمًا عن الشهر اللي قبله، في اليوم ده من كل شهر.</div></div></div>
+        <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:8px;direction:ltr">${days.map((d) => html`<button type="button" class=${'chip' + (f.payday === d ? ' on' : '')} style="padding:0;height:44px;border-radius:14px" onClick=${() => set('payday', d)}>${d}</button>`)}</div>
+        <button type="button" class=${'chip' + (f.payday === 31 ? ' on' : '')} onClick=${() => set('payday', 31)}>آخر يوم في الشهر</button>
+        <div class="note info">مرتب ${monthShort(monthStart(todayKey()))} بيتصرف ${fmtShort(keyToDate(paydayOf(monthStart(todayKey()), { payday_override: f.payday })))}.</div>
+      </div>
+      <button class="btn" disabled=${busy} onClick=${save}>حفظ</button>
+    </div>
+  </div>`;
+}
+
+function SetLeaves() {
+  const { S } = CTX;
+  const [f, setF] = useState({ paid: Number(S.paid_leave_days ?? 2), extra: S.extra_leave_deduction === 'none' ? 'none' : 'full_day', pct: Number(S.advance_max_pct ?? 50), inst: Number(S.advance_max_installments ?? 3), nr: S.notify_requests !== false });
+  const [busy, setBusy] = useState(false);
+  async function save() {
+    setBusy(true);
+    try { await saveSettings({ paid_leave_days: f.paid, extra_leave_deduction: f.extra, advance_max_pct: f.pct, advance_max_installments: f.inst, notify_requests: f.nr }); reloadSettings(); toast('اتحفظت الإعدادات'); }
+    catch (e) { toast(errText(e.message), 'bad'); }
+    setBusy(false);
+  }
+  const row = (t, d, ctrl) => html`<div class="row"><div class="grow"><div class="h3">${t}</div><div class="soft">${d}</div></div>${ctrl}</div>`;
+  return html`<div class="page nonav">
+    <${Hero} title="الإجازات والسلف" back="settings" slim />
+    <div class="body flat">
+      <div class="card">
+        <div class="h2">الإجازات</div>
+        ${row('أيام إجازة مدفوعة في الشهر', 'بتتحسب كأنه اشتغل ساعات الشفت', html`<${Stepper} value=${f.paid} min=${0} max=${10} onChange=${(v) => setF({ ...f, paid: v })} />`)}
+        <div><div class="h3" style="margin-bottom:8px">الأيام الزيادة عن كده</div><div class="chips">
+          <button class=${'chip' + (f.extra === 'full_day' ? ' on' : '')} onClick=${() => setF({ ...f, extra: 'full_day' })}>من غير أجر</button>
+          <button class=${'chip' + (f.extra === 'none' ? ' on' : '')} onClick=${() => setF({ ...f, extra: 'none' })}>بأجر برضه</button></div></div>
+      </div>
+      <div class="card">
+        <div class="h2">السلف</div>
+        ${row('أقصى سلفة', 'نسبة من المرتب الأساسي', html`<${Stepper} value=${f.pct} min=${10} max=${100} step=${5} unit="٪" onChange=${(v) => setF({ ...f, pct: v })} />`)}
+        ${row('أقصى عدد أقساط', 'بيختار منها الموظف وأنت بتعدّلها وقت القبول', html`<${Stepper} value=${f.inst} min=${1} max=${12} onChange=${(v) => setF({ ...f, inst: v })} />`)}
+      </div>
+      <div class="card">${row('إشعار بالطلبات الجديدة', 'للإدارة لما موظف يطلب إجازة أو سلفة', html`<${Toggle} on=${f.nr} onChange=${(v) => setF({ ...f, nr: v })} />`)}</div>
+      <button class="btn" disabled=${busy} onClick=${save}>حفظ</button>
+    </div>
+  </div>`;
+}
+
+function SetPerm() {
+  const { S } = CTX;
+  const init = { manager: [], hr: [], accountant: [], ...DEFAULT_PERMS, ...(S.role_permissions || {}) };
+  const [perms, setPerms] = useState(init);
+  const [staff, setStaff] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const ROLES = [['manager', 'مدير'], ['hr', 'موارد بشرية'], ['accountant', 'محاسب']];
+  async function loadStaff() { const { data } = await sb.from('staff').select('id,full_name,code,role,active').order('code'); setStaff(data || []); }
+  useEffect(() => { loadStaff(); }, []);
+  const toggle = (role, p) => setPerms((o) => ({ ...o, [role]: o[role].includes(p) ? o[role].filter((x) => x !== p) : [...o[role], p] }));
+  async function save() {
+    setBusy(true);
+    try { await saveSettings({ role_permissions: perms }); reloadSettings(); toast('اتحفظت الصلاحيات'); }
+    catch (e) { toast(errText(e.message), 'bad'); }
+    setBusy(false);
+  }
+  async function setRole(s, role) {
+    if (!confirm('تغيير دور ' + s.full_name + ' إلى ' + (ROLE_LABEL[role] || role) + '؟')) { loadStaff(); return; }
+    const { error } = await sb.from('staff').update({ role }).eq('id', s.id);
+    if (error) toast(errText(error.message), 'bad'); else toast('اتغيّر الدور');
+    loadStaff();
+  }
+  return html`<div class="page nonav">
+    <${Hero} title="الصلاحيات" back="settings" slim />
+    <div class="body flat">
+      <div class="note info">المدير العام عنده كل الصلاحيات دايمًا ومش بيتعدّل. حدّد لكل دور تاني هيشوف ويعمل إيه.</div>
+      ${ROLES.map(([role, label]) => html`<div class="card"><div class="h2">${label}</div>
+        ${PERMS.map(([p, l]) => html`<div class="row"><div class="grow" style="font-size:14.5px">${l}</div><${Toggle} on=${perms[role].includes(p)} onChange=${() => toggle(role, p)} /></div>`)}</div>`)}
+      <button class="btn" disabled=${busy} onClick=${save}>حفظ الصلاحيات</button>
+      <div class="card tight">
+        <div class="h2" style="padding:12px 0 4px">دور كل حد</div>
+        ${staff === null ? html`<div class="empty">لحظة...</div>` : staff.map((s) => html`<div class="list-row">
+          <div class="avatar tone-sand">${initial(s.full_name)}</div>
+          <div class="grow"><div style="font-weight:600">${s.full_name}</div><div class="soft">كود ${s.code}${s.active ? '' : ' · موقوف'}</div></div>
+          <select class="select" style="width:auto;height:44px" value=${s.role} onChange=${(e) => setRole(s, e.target.value)}>
+            ${Object.entries(ROLE_LABEL).map(([k, v]) => html`<option value=${k} selected=${s.role === k}>${v}</option>`)}</select></div>`)}
+      </div>
+    </div>
+  </div>`;
+}
+
 /* ================= admin shell ================= */
-const ADM_NAV = [
+const ADM_NAV_ALL = [
   { id: 'dash', icon: 'home', label: 'الرئيسية' },
-  { id: 'employees', icon: 'users', label: 'الموظفين' },
-  { id: 'att', icon: 'calendar', label: 'الحضور' },
-  { id: 'pay', icon: 'wallet', label: 'المرتبات' },
-  { id: 'settings', icon: 'sliders', label: 'الإعدادات' },
+  { id: 'employees', icon: 'users', label: 'الموظفين', ok: () => can('employees.view') },
+  { id: 'att', icon: 'calendar', label: 'الحضور', ok: () => can('attendance.view') },
+  { id: 'pay', icon: 'wallet', label: 'المرتبات', ok: () => can('payroll.view') },
+  { id: 'settings', icon: 'sliders', label: 'الإعدادات', ok: () => can('settings.edit') || can('roles.manage') || can('log.view') },
 ];
 
 function AdminShell({ route }) {
@@ -974,21 +1698,31 @@ function AdminShell({ route }) {
       .subscribe();
     return () => { sb.removeChannel(ch); };
   }, []);
+  const navItems = ADM_NAV_ALL.filter((n) => !n.ok || n.ok());
+  const gate = (ok, node) => (ok ? node : html`<${Denied} />`);
   let view;
   let tab = head;
-  if (head === 'employee' && parts[1]) { view = html`<${AdmEmployee} id=${parts[1]} key=${parts[1]} />`; tab = 'employees'; }
-  else if (head === 'add') { view = html`<${AdmAdd} />`; tab = 'employees'; }
-  else if (head === 'employees') view = html`<${AdmEmployees} />`;
-  else if (head === 'att') view = html`<${AdmAtt} />`;
-  else if (head === 'pay') view = html`<${Soon} title="المرتبات" text="كشف المرتبات والرصيد بالساعة هيظهروا هنا في التحديث الجاي." />`;
+  let hideNav = false;
+  if (head === 'employee' && parts[1]) { view = gate(can('employees.view'), html`<${AdmEmployee} id=${parts[1]} key=${parts[1]} />`); tab = 'employees'; hideNav = true; }
+  else if (head === 'add') { view = gate(can('employees.edit'), html`<${AdmAdd} />`); tab = 'employees'; hideNav = true; }
+  else if (head === 'employees') view = gate(can('employees.view'), html`<${AdmEmployees} />`);
+  else if (head === 'att') view = gate(can('attendance.view'), html`<${AdmAtt} />`);
+  else if (head === 'pay') view = gate(can('payroll.view'), html`<${AdmPay} />`);
+  else if (head === 'payroll') { view = gate(can('payroll.view'), html`<${AdmPayroll} id=${parts[1]} month=${parts[2]} key=${parts[1] + parts[2]} />`); tab = 'pay'; hideNav = true; }
+  else if (head === 'backfill') { view = gate(can('payroll.edit'), html`<${Backfill} id=${parts[1]} month=${parts[2]} key=${parts[1] + parts[2]} />`); tab = 'pay'; hideNav = true; }
+  else if (head === 'requests') { view = gate(can('leaves.decide') || can('advances.decide'), html`<${AdmRequests} tabInit=${parts[1]} key=${parts[1]} />`); tab = 'dash'; }
   else if (head === 'notifications') { view = html`<${Notifications} onRead=${loadUnread} />`; tab = 'dash'; }
-  else if (head === 'settings') view = html`<${SetHub} />`;
+  else if (head === 'settings') view = gate(navItems.some((n) => n.id === 'settings'), html`<${SetHub} />`);
   else if (head === 'set') {
-    tab = 'settings';
-    view = { location: html`<${SetLocation} />`, shifts: html`<${SetShifts} />`, rules: html`<${SetRules} />`, log: html`<${SetLog} />` }[parts[1]] || html`<${SetHub} />`;
+    tab = 'settings'; hideNav = true;
+    const m = {
+      location: [can('settings.edit'), SetLocation], shifts: [can('settings.edit'), SetShifts], rules: [can('settings.edit'), SetRules],
+      pay: [can('settings.edit'), SetPay], leaves: [can('settings.edit'), SetLeaves], perm: [can('roles.manage'), SetPerm], log: [can('log.view'), SetLog],
+    }[parts[1]];
+    view = m ? gate(m[0], html`<${m[1]} />`) : html`<${SetHub} />`;
+    if (!m) hideNav = false;
   } else { view = html`<${AdmDash} unread=${unread} />`; tab = 'dash'; }
-  const hideNav = head === 'add' || head === 'employee' || head === 'set';
-  return html`<div style="height:100%">${view}${!hideNav && html`<${Nav} items=${ADM_NAV} tab=${tab} />`}</div>`;
+  return html`<div style="height:100%">${view}${!hideNav && html`<${Nav} items=${navItems} tab=${tab} />`}</div>`;
 }
 
 /* ================= app root ================= */
