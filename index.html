@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#16161A">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="الكابتن">
+<title>الكابتن</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" href="icon-192.png">
+<link rel="stylesheet" href="styles.css?v=1">
+<!-- Fonts load in the background: the app never waits for them -->
+<link rel="stylesheet" media="print" onload="this.media='all'"
+  href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600&family=Readex+Pro:wght@400;500;600&display=swap">
+</head>
+<body>
+<div id="app"></div>
+
+<div id="boot" style="position:fixed;inset:0;z-index:9999;background:#16161A;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:24px;color:#fff;font-family:system-ui,sans-serif;text-align:center;overflow:auto;">
+  <img src="captain-logo.png" alt="الكابتن" style="width:min(260px,70%);display:block;">
+  <div style="font-weight:600;font-size:16px;color:#B9B6BF;">لحظة...</div>
+  <div id="boot-diag" style="display:none;background:#fff;color:#1D1D22;border-radius:16px;padding:14px;max-width:340px;width:100%;font-size:14px;text-align:start;">
+    <div style="font-weight:700;margin-bottom:8px;">بياخد وقت أطول من المعتاد</div>
+    <div id="boot-list" style="display:flex;flex-direction:column;gap:4px;margin-bottom:8px;"></div>
+    <pre id="boot-err" style="white-space:pre-wrap;word-break:break-word;font-size:12px;margin:0 0 10px;"></pre>
+    <button onclick="location.reload()" style="height:44px;width:100%;border:0;border-radius:22px;background:#C8202A;color:#fff;font-weight:700;font-size:16px;">إعادة تحميل</button>
+  </div>
+</div>
+
+<script>
+  // If the app has not started after 9 seconds, show which file or service is not reachable.
+  (function () {
+    var errors = [];
+    window.addEventListener('error', function (e) {
+      errors.push((e.message || 'error') + (e.filename ? ' @ ' + e.filename.split('/').slice(-2).join('/') : ''));
+    });
+    window.addEventListener('unhandledrejection', function (e) {
+      errors.push('promise: ' + ((e.reason && e.reason.message) || e.reason));
+    });
+    var modules = [
+      ['htm/preact', 'https://cdn.jsdelivr.net/npm/htm@3.1.1/preact/standalone.module.js'],
+      ['config.js', './config.js?v=1'], ['icons.js', './icons.js?v=1'], ['app.js', './app.js?v=1']
+    ];
+    setTimeout(function () {
+      if (window.__mounted) return;
+      var box = document.getElementById('boot-diag');
+      if (!box) return;
+      box.style.display = 'block';
+      var list = document.getElementById('boot-list');
+      modules.forEach(function (m) {
+        var r = document.createElement('div');
+        r.textContent = '… ' + m[0];
+        list.appendChild(r);
+        var timer = new Promise(function (_, rej) { setTimeout(function () { rej(new Error('no answer after 10s')); }, 10000); });
+        Promise.race([import(m[1]), timer])
+          .then(function () { r.textContent = '✓ ' + m[0]; })
+          .catch(function (e) { r.textContent = '✗ ' + m[0] + ' -> ' + ((e && e.message) || e); });
+      });
+      setInterval(function () { document.getElementById('boot-err').textContent = errors.join('\n'); }, 1000);
+    }, 9000);
+  })();
+</script>
+
+<script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script type="module" src="app.js?v=1"></script>
+</body>
+</html>
