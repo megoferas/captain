@@ -1311,20 +1311,22 @@ function AdmAtt() {
   const [shifts, setShifts] = useState({});
   const [edit, setEdit] = useState(null);
   const [excuses, setExcuses] = useState([]);
-  const [raw, setRaw] = useState({ staff: [], onLeave: [] });
+  const [raw, setRaw] = useState({ staff: [], onLeave: [], board: null });
   const [ex, setEx] = useState(null);
   async function load() {
     let q = sb.from('attendance').select('*, staff(full_name, code, shift_id)');
     q = mode === 'day' ? q.eq('work_date', day).order('check_in') : q.eq('review', 'pending').order('work_date', { ascending: false });
     if (mode === 'day') {
-      const [a, sf, lv, exs] = await Promise.all([
+      const [a, sf, lv, exs, bd] = await Promise.all([
         q,
         sb.from('staff').select('id,full_name,code,shift_id,start_date').eq('role', 'employee').eq('active', true).order('full_name'),
         sb.from('leaves').select('staff_id').eq('status', 'approved').lte('from_date', day).gte('to_date', day),
         sb.from('day_excuses').select('*').eq('work_date', day).eq('voided', false),
+        // for today, take the absent list from the same source as the home and employees screens
+        day === todayKey() ? sb.rpc('today_board') : Promise.resolve({ data: null }),
       ]);
       setRows(a.data || []);
-      setRaw({ staff: sf.data || [], onLeave: (lv.data || []).map((x) => x.staff_id) });
+      setRaw({ staff: sf.data || [], onLeave: (lv.data || []).map((x) => x.staff_id), board: bd.data || null });
       setExcuses(exs.data || []);
     } else {
       const { data } = await q;
@@ -1339,7 +1341,11 @@ function AdmAtt() {
   const present = new Set((rows || []).map((r) => r.staff_id));
   const pastGrace = (s) => { const sh = shifts[s.shift_id]; return !!sh && minsOfDay(new Date().toISOString()) > shiftStartMin(sh) + grace; };
   const isEx = (id, kind) => excuses.some((e) => e.staff_id === id && e.kind === kind);
-  const absent = mode === 'day' && rows ? raw.staff.filter((s) => !present.has(s.id) && !raw.onLeave.includes(s.id) && (!s.start_date || s.start_date <= day) && !isEx(s.id, 'absence') && (day < todayKey() || pastGrace(s))) : [];
+  const absent = mode === 'day' && rows
+    ? (raw.board && day === todayKey()
+      ? raw.board.filter((r) => r.status === 'absent').map((r) => ({ id: r.staff_id, full_name: r.full_name, code: r.code }))
+      : raw.staff.filter((s) => !present.has(s.id) && !raw.onLeave.includes(s.id) && (!s.start_date || s.start_date <= day) && !isEx(s.id, 'absence') && (day < todayKey() || pastGrace(s))))
+    : [];
   const excusedAbs = excuses.filter((e) => e.kind === 'absence');
   const nameOf = (id) => { const s = raw.staff.find((x) => x.id === id); return s ? s.full_name : '—'; };
   const canEdit = can('attendance.edit');
