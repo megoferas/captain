@@ -107,6 +107,10 @@ function errText(msg) {
     last_super_admin: 'لازم يفضل مدير عام واحد على الأقل.',
     only_super_admin_can_change_roles: 'مش مسموحلك تغيّر الأدوار.',
     bad_role: 'الدور مش صحيح.',
+    bad_kind: 'النوع مش صحيح.',
+    no_attendance: 'مفيش حضور مسجّل في اليوم ده.',
+    has_attendance: 'الموظف ليه حضور في اليوم ده، فمش غياب.',
+    on_leave: 'اليوم ده إجازة معتمدة أصلًا.',
   };
   if (map[m]) return map[m];
   if (/already been registered|already exists|duplicate/i.test(m)) return 'الكود ده مستخدم قبل كده.';
@@ -384,21 +388,28 @@ function EmpHome({ unread }) {
 function EmpHistory() {
   const { me, shift, S } = CTX;
   const [rows, setRows] = useState(null);
+  const [exs, setExs] = useState([]);
   useEffect(() => {
     sb.from('attendance').select('*').eq('staff_id', me.id).order('work_date', { ascending: false }).limit(60)
       .then(({ data }) => setRows(data || []));
+    sb.from('day_excuses').select('*').eq('staff_id', me.id).eq('voided', false).order('work_date', { ascending: false }).limit(60)
+      .then(({ data }) => setExs(data || []));
   }, []);
   const grace = Number(S.grace_minutes ?? 30);
   return html`<div class="page">
     <${Hero} title="سجل الحضور" sub="آخر 60 يوم" slim />
     <div class="body flat">
+      ${exs.filter((e) => e.kind === 'absence').length > 0 && html`<div class="card tight"><div class="h2" style="padding:12px 0 4px">أيام اتلغى غيابها</div>
+        ${exs.filter((e) => e.kind === 'absence').map((e) => html`<div class="list-row"><${Tile} icon="check" tone="green" sm /><div class="grow"><div style="font-weight:600">${fmtShort(keyToDate(e.work_date))}</div><div class="soft">${e.reason}</div></div>
+          <${Pill} tone=${e.mode === 'paid' ? 'green' : 'sand'}>${e.mode === 'paid' ? 'بأجر' : 'بدون أجر'}<//></div>`)}</div>`}
       <div class="card tight">
         ${rows === null ? html`<div class="empty">لحظة...</div>` : rows.length === 0 ? html`<div class="empty">لسه مفيش سجل حضور.</div>` : rows.map((a) => html`
           <div class="list-row">
             <div class="grow"><div style="font-weight:600">${fmtShort(keyToDate(a.work_date))}</div>
               <div class="soft num">${fmtTime(a.check_in)} — ${a.check_out ? fmtTime(a.check_out) : 'لسه شغال'}</div></div>
             <div class="stack" style="align-items:flex-end;gap:4px">
-              <${Pill} tone=${lateMin(a, shift) > grace ? 'amber' : 'green'}>${fullHours(a)} ساعة<//>
+              <${Pill} tone=${lateMin(a, shift) > grace && !exs.some((e) => e.kind === 'late' && e.work_date === a.work_date) ? 'amber' : 'green'}>${fullHours(a)} ساعة<//>
+              ${exs.some((e) => e.kind === 'late' && e.work_date === a.work_date) && html`<span class="soft">التأخير اتلغى</span>`}
               ${a.closed_by === 'auto' && html`<span class="soft">انصراف تلقائي</span>`}
               ${a.edited && html`<span class="soft">معدّل من الإدارة</span>`}
             </div>
@@ -468,7 +479,8 @@ function PayBreakdown({ c }) {
   const rate = Number(c.hour_rate);
   const otRate = (rate * Number(c.ot_pct)) / 100;
   return html`<div class="card tight">
-    <${PayRow} icon="clock" tone="sand" label="ساعات الشغل" hint=${c.hours_regular + ' ساعة كاملة × ' + fmtMoney(rate)} amount=${fmtMoney(c.amount_regular)} />
+    <${PayRow} icon="clock" tone="sand" label="ساعات الشغل" hint=${c.hours_regular + ' ساعة كاملة × ' + fmtMoney(rate) + (Number(c.late_excused) > 0 ? ' · ' + c.late_excused + ' تأخير اتلغى' : '')} amount=${fmtMoney(c.amount_regular)} />
+    ${Number(c.excused_paid_days) > 0 && html`<${PayRow} icon="check" tone="green" label="أيام اتلغى غيابها" hint=${c.excused_paid_days + ' يوم بأجر'} amount=${'+' + fmtMoney(c.amount_excused)} kind="pos" />`}
     ${(Number(c.paid_leave_days) > 0 || Number(c.unpaid_leave_days) > 0) && html`<${PayRow} icon="sun" tone="slate" label="إجازة مدفوعة"
       hint=${c.paid_leave_days + ' يوم من ' + c.paid_leave_allowance + (Number(c.unpaid_leave_days) > 0 ? ' · ' + c.unpaid_leave_days + ' يوم من غير أجر' : '')} amount=${'+' + fmtMoney(c.amount_leave)} kind="pos" />`}
     ${Number(c.hours_overtime) > 0 && html`<${PayRow} icon="auto" tone="amber" label="ساعات إضافية" hint=${c.hours_overtime + ' ساعة × ' + fmtMoney(otRate) + ' (' + c.ot_pct + '٪)'} amount=${'+' + fmtMoney(c.amount_overtime)} kind="pos" />`}
@@ -678,6 +690,7 @@ const STATUS = {
   absent: { tone: 'red', label: 'غايب' },
   waiting: { tone: 'sand', label: 'لسه' },
   leave: { tone: 'slate', label: 'إجازة' },
+  excused: { tone: 'green', label: 'اتلغى غيابه' },
 };
 const ROLE_LABEL = { employee: 'موظف', manager: 'مدير', hr: 'موارد بشرية', accountant: 'محاسب', super_admin: 'مدير عام' };
 const randomPin = () => String(Math.floor(100000 + Math.random() * 900000));
@@ -686,9 +699,43 @@ function Denied() {
   return html`<div class="page"><${Hero} title="مش مسموح" slim /><div class="body flat"><div class="card"><div class="empty"><${Icon} name="lock" size=${24} /> <span>الدور بتاعك مالوش صلاحية الصفحة دي. اطلبها من المدير العام.</span></div></div></div></div>`;
 }
 
+function ExcuseSheet({ staffId, name, date, kind, onClose, onDone }) {
+  const [mode, setMode] = useState('paid');
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  async function go() {
+    setBusy(true);
+    const { error } = await sb.rpc('excuse_day', { p_staff: staffId, p_date: date, p_kind: kind, p_mode: kind === 'late' ? 'paid' : mode, p_reason: reason });
+    setBusy(false);
+    if (error) return toast(errText(error.message), 'bad');
+    toast(kind === 'late' ? 'اتلغى التأخير' : 'اتلغى الغياب');
+    onDone();
+  }
+  return html`<${Sheet} title=${(kind === 'late' ? 'إلغاء تأخير ' : 'إلغاء غياب ') + name} onClose=${onClose}>
+    <div class="soft">${fmtShort(keyToDate(date))}</div>
+    ${kind === 'late'
+      ? html`<div class="note info">حضوره هيتحسب من بداية الشفت، ومش هيتحسب عليه تأخير ولا خصم. سجل الحضور الأصلي بيفضل زي ما هو.</div>`
+      : html`<div class="chips"><button class=${'chip' + (mode === 'paid' ? ' on' : '')} onClick=${() => setMode('paid')}>يوم بأجر</button>
+          <button class=${'chip' + (mode === 'unpaid' ? ' on' : '')} onClick=${() => setMode('unpaid')}>معذور بدون أجر</button></div>
+        <div class="note info">${mode === 'paid' ? 'اليوم هيتحسب كأنه اشتغل الشفت كله، من غير ما يخصم من أيام الإجازة.' : 'مش هيتحسب غياب، بس مفيش أجر عن اليوم ده.'}</div>`}
+    <label class="field">السبب<input class="input" placeholder=${kind === 'late' ? 'مثال: عطل في المواصلات' : 'مثال: كان في مأمورية'} value=${reason} onInput=${(e) => setReason(e.target.value)} /></label>
+    <button class="btn" disabled=${busy} onClick=${go}>${busy ? 'لحظة...' : kind === 'late' ? 'إلغاء التأخير' : 'إلغاء الغياب'}</button>
+  <//>`;
+}
+
+async function voidExcuseAsk(ex, done) {
+  const reason = prompt('سبب التراجع؟');
+  if (!reason) return;
+  const { error } = await sb.rpc('void_excuse', { p_id: ex.id, p_reason: reason });
+  if (error) return toast(errText(error.message), 'bad');
+  toast('اتلغى الإلغاء');
+  done();
+}
+
 function AdmDash({ unread }) {
   const [board, setBoard] = useState(null);
   const [cnt, setCnt] = useState({ review: 0, leaves: 0, advances: 0 });
+  const [ex, setEx] = useState(null);
   async function load() {
     const head = { count: 'exact', head: true };
     const [b, p, l, a] = await Promise.all([
@@ -733,14 +780,18 @@ function AdmDash({ unread }) {
       ${can('attendance.view') && html`<div class="card tight">
         <div class="h2" style="padding:12px 0 4px">حضور اليوم</div>
         ${board === null ? html`<div class="empty">لحظة...</div>` : board.length === 0 ? html`<div class="empty">لسه مفيش موظفين. ضيف أول موظف من تبويب الموظفين.</div>` : board.map((r) => html`
-          <a class="list-row" href=${'#employee/' + r.staff_id}>
-            <div class=${'avatar tone-' + STATUS[r.status].tone}>${initial(r.full_name)}</div>
-            <div class="grow"><div style="font-weight:600">${r.full_name}</div>
-              <div class="soft num">${r.check_in ? 'حضور ' + fmtTime(r.check_in) + (r.check_out ? ' · انصراف ' + fmtTime(r.check_out) : '') : 'كود ' + r.code}</div></div>
-            <${Pill} tone=${STATUS[r.status].tone}>${STATUS[r.status].label}<//>
-          </a>`)}
+          <div class="list-row">
+            <a class="row grow" href=${'#employee/' + r.staff_id}>
+              <div class=${'avatar tone-' + STATUS[r.status].tone}>${initial(r.full_name)}</div>
+              <div class="grow"><div style="font-weight:600">${r.full_name}</div>
+                <div class="soft num">${r.check_in ? 'حضور ' + fmtTime(r.check_in) + (r.check_out ? ' · انصراف ' + fmtTime(r.check_out) : '') : 'كود ' + r.code}</div></div>
+              <${Pill} tone=${STATUS[r.status].tone}>${STATUS[r.status].label}<//>
+            </a>
+            ${(r.status === 'late' || r.status === 'absent') && can('attendance.edit') && html`<button class="btn ghost auto" style="height:38px;padding:0 12px;font-size:13px;border-radius:12px" onClick=${() => setEx({ staffId: r.staff_id, name: r.full_name, kind: r.status === 'late' ? 'late' : 'absence' })}>إلغاء</button>`}
+          </div>`)}
       </div>`}
     </div>
+    ${ex && html`<${ExcuseSheet} ...${ex} date=${todayKey()} onClose=${() => setEx(null)} onDone=${() => { setEx(null); load(); }} />`}
   </div>`;
 }
 
@@ -1259,16 +1310,40 @@ function AdmAtt() {
   const [rows, setRows] = useState(null);
   const [shifts, setShifts] = useState({});
   const [edit, setEdit] = useState(null);
+  const [excuses, setExcuses] = useState([]);
+  const [raw, setRaw] = useState({ staff: [], onLeave: [] });
+  const [ex, setEx] = useState(null);
   async function load() {
     let q = sb.from('attendance').select('*, staff(full_name, code, shift_id)');
     q = mode === 'day' ? q.eq('work_date', day).order('check_in') : q.eq('review', 'pending').order('work_date', { ascending: false });
-    const { data } = await q;
-    setRows(data || []);
+    if (mode === 'day') {
+      const [a, sf, lv, exs] = await Promise.all([
+        q,
+        sb.from('staff').select('id,full_name,code,shift_id,start_date').eq('role', 'employee').eq('active', true).order('full_name'),
+        sb.from('leaves').select('staff_id').eq('status', 'approved').lte('from_date', day).gte('to_date', day),
+        sb.from('day_excuses').select('*').eq('work_date', day).eq('voided', false),
+      ]);
+      setRows(a.data || []);
+      setRaw({ staff: sf.data || [], onLeave: (lv.data || []).map((x) => x.staff_id) });
+      setExcuses(exs.data || []);
+    } else {
+      const { data } = await q;
+      setRows(data || []);
+      setExcuses([]);
+    }
   }
   useEffect(() => { sb.from('shifts').select('*').then(({ data }) => { const m = {}; (data || []).forEach((s) => { m[s.id] = s; }); setShifts(m); }); }, []);
   useEffect(() => { setRows(null); load(); }, [day, mode]);
   const grace = Number(CTX.S.grace_minutes ?? 30);
   const pendingCount = mode === 'pending' && rows ? rows.length : null;
+  const present = new Set((rows || []).map((r) => r.staff_id));
+  const pastGrace = (s) => { const sh = shifts[s.shift_id]; return !!sh && minsOfDay(new Date().toISOString()) > shiftStartMin(sh) + grace; };
+  const isEx = (id, kind) => excuses.some((e) => e.staff_id === id && e.kind === kind);
+  const absent = mode === 'day' && rows ? raw.staff.filter((s) => !present.has(s.id) && !raw.onLeave.includes(s.id) && (!s.start_date || s.start_date <= day) && !isEx(s.id, 'absence') && (day < todayKey() || pastGrace(s))) : [];
+  const excusedAbs = excuses.filter((e) => e.kind === 'absence');
+  const nameOf = (id) => { const s = raw.staff.find((x) => x.id === id); return s ? s.full_name : '—'; };
+  const canEdit = can('attendance.edit');
+  const smallBtn = 'height:38px;padding:0 12px;font-size:13px;border-radius:12px';
   return html`<div class="page">
     <${Hero} title="الحضور" sub="راجع وعدّل سجلات الحضور" />
     <div class="body">
@@ -1281,11 +1356,15 @@ function AdmAtt() {
       <div class="card tight">
         ${rows === null ? html`<div class="empty">لحظة...</div>` : rows.length === 0 ? html`<div class="empty">${mode === 'pending' ? 'مفيش حاجة محتاجة مراجعة.' : 'مفيش حضور مسجّل في اليوم ده.'}</div>` : rows.map((a) => {
           const sh = shifts[a.staff && a.staff.shift_id];
+          const lateEx = isEx(a.staff_id, 'late');
+          const isLate = lateMin(a, sh) > grace && !lateEx;
           return html`<button class="list-row" onClick=${() => setEdit(a)}>
-            <div class=${'avatar tone-' + (a.review === 'pending' ? 'amber' : lateMin(a, sh) > grace ? 'amber' : 'green')}>${initial(a.staff && a.staff.full_name)}</div>
+            <div class=${'avatar tone-' + (a.review === 'pending' || isLate ? 'amber' : 'green')}>${initial(a.staff && a.staff.full_name)}</div>
             <div class="grow"><div style="font-weight:600">${a.staff ? a.staff.full_name : '—'}${mode === 'pending' ? ' · ' + fmtShort(keyToDate(a.work_date)) : ''}</div>
               <div class="soft num">${fmtTime(a.check_in)} — ${a.check_out ? fmtTime(a.check_out) : 'لسه شغال'} · ${fullHours(a)} ساعة</div></div>
             <div class="stack" style="align-items:flex-end;gap:4px">
+              ${isLate && html`<${Pill} tone="amber">متأخر<//>`}
+              ${lateEx && html`<${Pill} tone="green">التأخير اتلغى<//>`}
               ${a.review === 'pending' && html`<${Pill} tone="amber">للمراجعة<//>`}
               ${a.closed_by === 'auto' && a.review !== 'pending' && html`<${Pill}>تلقائي<//>`}
               ${a.edited && html`<${Pill} tone="slate">معدّل<//>`}
@@ -1293,12 +1372,27 @@ function AdmAtt() {
             </div></button>`;
         })}
       </div>
+      ${absent.length > 0 && html`<div class="card tight">
+        <div class="h2" style="padding:12px 0 4px">غايبين</div>
+        ${absent.map((s) => html`<div class="list-row"><div class="avatar tone-red">${initial(s.full_name)}</div>
+          <div class="grow"><div style="font-weight:600">${s.full_name}</div><div class="soft">كود ${s.code}</div></div>
+          ${canEdit && html`<button class="btn ghost auto" style=${smallBtn} onClick=${() => setEx({ staffId: s.id, name: s.full_name, kind: 'absence' })}>إلغاء الغياب</button>`}</div>`)}
+      </div>`}
+      ${excusedAbs.length > 0 && html`<div class="card tight">
+        <div class="h2" style="padding:12px 0 4px">اتلغى غيابهم</div>
+        ${excusedAbs.map((e) => html`<div class="list-row"><div class="avatar tone-green">${initial(nameOf(e.staff_id))}</div>
+          <div class="grow"><div style="font-weight:600">${nameOf(e.staff_id)}</div><div class="soft">${e.reason}</div></div>
+          <${Pill} tone=${e.mode === 'paid' ? 'green' : 'sand'}>${e.mode === 'paid' ? 'بأجر' : 'بدون أجر'}<//>
+          ${canEdit && html`<button class="linkbtn" onClick=${() => voidExcuseAsk(e, load)}>تراجع</button>`}</div>`)}
+      </div>`}
     </div>
-    ${edit && html`<${EditAtt} a=${edit} onClose=${() => setEdit(null)} onDone=${() => { setEdit(null); load(); window.dispatchEvent(new Event('adm-refresh')); }} />`}
+    ${edit && html`<${EditAtt} a=${edit} grace=${grace} lateBy=${lateMin(edit, shifts[edit.staff && edit.staff.shift_id])} lateEx=${excuses.find((e) => e.staff_id === edit.staff_id && e.kind === 'late')}
+      onClose=${() => setEdit(null)} onDone=${() => { setEdit(null); load(); window.dispatchEvent(new Event('adm-refresh')); }} />`}
+    ${ex && html`<${ExcuseSheet} ...${ex} date=${day} onClose=${() => setEx(null)} onDone=${() => { setEx(null); load(); window.dispatchEvent(new Event('adm-refresh')); }} />`}
   </div>`;
 }
 
-function EditAtt({ a, onClose, onDone }) {
+function EditAtt({ a, grace, lateBy, lateEx, onClose, onDone }) {
   const [cin, setCin] = useState(toLocalInput(a.check_in));
   const [cout, setCout] = useState(a.check_out ? toLocalInput(a.check_out) : '');
   const [reason, setReason] = useState('');
@@ -1327,14 +1421,27 @@ function EditAtt({ a, onClose, onDone }) {
     toast('اتعتمد السجل');
     onDone();
   }
+  async function excuseLate() {
+    if (!reason.trim()) return toast('اكتب السبب الأول.', 'bad');
+    setBusy(true);
+    const { error } = await sb.rpc('excuse_day', { p_staff: a.staff_id, p_date: a.work_date, p_kind: 'late', p_mode: 'paid', p_reason: reason });
+    setBusy(false);
+    if (error) return toast(errText(error.message), 'bad');
+    toast('اتلغى التأخير');
+    onDone();
+  }
+  const canEdit = can('attendance.edit');
   return html`<${Sheet} title=${(a.staff ? a.staff.full_name : 'سجل') + ' · ' + fmtShort(keyToDate(a.work_date))} onClose=${onClose}>
     ${a.closed_by === 'auto' && html`<div class="note warn">اليوم ده اتقفل تلقائيًا لأن الموظف نسي الانصراف. راجعه واعتمده أو عدّل وقت الانصراف.</div>`}
     ${a.in_zone === false && html`<div class="note bad">الحضور اتسجّل وهو خارج النطاق (${Math.round(a.in_dist_m || 0)} متر).</div>`}
+    ${lateEx ? html`<div class="note ok">التأخير اتلغى: ${lateEx.reason}. حضوره بيتحسب من بداية الشفت.</div>` : lateBy > grace ? html`<div class="note warn">اتأخر ${lateBy} دقيقة.</div>` : ''}
     <label class="field">وقت الحضور<input class="input" type="datetime-local" value=${cin} onInput=${(e) => setCin(e.target.value)} /></label>
     <label class="field">وقت الانصراف<input class="input" type="datetime-local" value=${cout} onInput=${(e) => setCout(e.target.value)} /></label>
     ${CTX.S.overtime_requires_approval === true && html`<div class="row"><div class="grow"><div class="h3">اعتماد الساعات الإضافية</div><div class="soft">مش هتتحسب من غير اعتمادك</div></div><${Toggle} on=${otOk} onChange=${toggleOt} /></div>`}
-    <label class="field">سبب التعديل<input class="input" placeholder="مثال: نسي يسجّل الانصراف" value=${reason} onInput=${(e) => setReason(e.target.value)} /></label>
+    <label class="field">السبب (للتعديل أو لإلغاء التأخير)<input class="input" placeholder="مثال: نسي يسجّل الانصراف" value=${reason} onInput=${(e) => setReason(e.target.value)} /></label>
     <button class="btn" disabled=${busy} onClick=${save}>حفظ التعديل</button>
+    ${canEdit && !lateEx && lateBy > grace && html`<button class="btn ghost" disabled=${busy} onClick=${excuseLate}><${Icon} name="check" size=${20} /> إلغاء التأخير</button>`}
+    ${canEdit && lateEx && html`<button class="btn ghost" disabled=${busy} onClick=${() => voidExcuseAsk(lateEx, onDone)}>التراجع عن إلغاء التأخير</button>`}
     ${a.review === 'pending' && html`<button class="btn ghost" disabled=${busy} onClick=${approve}><${Icon} name="check" size=${20} /> اعتماد كما هو</button>`}
     <div class="soft" style="text-align:center">الوقت الأصلي بيتحفظ في سجل النشاط.</div>
   <//>`;
@@ -1350,9 +1457,9 @@ function Notifications({ onRead, home }) {
   useEffect(() => { load(); window.addEventListener('adm-refresh', load); return () => window.removeEventListener('adm-refresh', load); }, []);
   async function readAll() { await sb.rpc('mark_notifications_read'); await load(); onRead(); }
   const icon = { late: ['clock', 'amber'], auto_close: ['auto', 'slate'], leave_request: ['sun', 'slate'], advance_request: ['down', 'amber'],
-    leave_decision: ['sun', 'green'], advance_decision: ['down', 'green'], adjustment: ['wallet', 'green'], paid: ['wallet', 'green'] };
+    leave_decision: ['sun', 'green'], advance_decision: ['down', 'green'], adjustment: ['wallet', 'green'], paid: ['wallet', 'green'], excuse: ['check', 'green'] };
   const target = (n) => (home
-    ? (n.type === 'adjustment' || n.type === 'paid' ? '#salary' : '#requests')
+    ? (n.type === 'adjustment' || n.type === 'paid' ? '#salary' : n.type === 'excuse' ? '#history' : '#requests')
     : n.type === 'leave_request' ? '#requests' : n.type === 'advance_request' ? '#requests/advances' : n.data && n.data.attendance_id ? '#att' : '#notifications');
   return html`<div class="page">
     <${Hero} title="الإشعارات" back=${home || 'dash'} slim />
