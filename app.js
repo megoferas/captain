@@ -27,6 +27,20 @@ const minsOfDay = (iso) => {
 const shiftStartMin = (sh) => { const [h, m] = String(sh.start_time).split(':'); return Number(h) * 60 + Number(m); };
 const lateMin = (att, sh) => (sh ? Math.max(0, minsOfDay(att.check_in) - shiftStartMin(sh)) : 0);
 const fullHours = (a) => Math.max(0, Math.floor(((a.check_out ? new Date(a.check_out) : new Date()) - new Date(a.check_in)) / 3600000));
+// paid hours by the shift clock: regular hours only inside the shift, overtime from the end of the shift until check-out
+const shiftStartTs = (a, sh) => new Date(a.check_in).getTime() - (minsOfDay(a.check_in) - shiftStartMin(sh)) * 60000;
+const paidParts = (a, sh) => {
+  if (!sh) return { reg: fullHours(a), ot: 0 };
+  const s = shiftStartTs(a, sh);
+  const e = s + Number(sh.hours) * 3600000;
+  const tin = new Date(a.check_in).getTime();
+  const tout = a.check_out ? new Date(a.check_out).getTime() : Date.now();
+  return {
+    reg: Math.max(0, Math.floor((Math.min(tout, e) - Math.max(tin, s)) / 3600000)),
+    ot: Math.max(0, Math.floor((tout - Math.max(e, tin)) / 3600000)),
+  };
+};
+const paidHours = (a, sh) => { const p = paidParts(a, sh); return p.reg + p.ot; };
 const pad2 = (n) => String(n).padStart(2, '0');
 const clock = (ms) => { const s = Math.max(0, Math.floor(ms / 1000)); return pad2(Math.floor(s / 3600)) + ':' + pad2(Math.floor((s % 3600) / 60)) + ':' + pad2(s % 60); };
 const toLocalInput = (iso) => {
@@ -331,10 +345,13 @@ function EmpHome({ unread }) {
   }
 
   const lateDays = month.filter((a) => lateMin(a, shift) > grace).length;
-  const hoursSum = month.reduce((s, a) => s + fullHours(a), 0);
+  const hoursSum = month.reduce((s, a) => s + paidHours(a, shift), 0);
+  const donePaid = last && last.check_out ? paidParts(last, shift) : null;
   const elapsed = open ? now - new Date(open.check_in).getTime() : 0;
   const shiftMs = shift ? Number(shift.hours) * 3600000 : 0;
-  const dueAt = open && shift && S.auto_close_enabled !== false ? new Date(open.check_in).getTime() + shiftMs : null;
+  const showDue = !!(open && shift && S.auto_close_enabled !== false);
+  const shiftEndLabel = shift ? hm12(shiftStartMin(shift) + Math.round(Number(shift.hours) * 60)) : '';
+  const cutLabel = hm12(Number(S.auto_close_hour ?? 2) * 60);
 
   return html`<div class="page">
     <${Hero} title=${greet() + ' يا ' + firstName(me.full_name)} sub=${fmtDay(new Date())} bell=${html`<${Bell} count=${unread} />`} />
@@ -348,17 +365,17 @@ function EmpHome({ unread }) {
             <div class="spread soft" style="margin-top:6px"><span>حضور ${fmtTime(open.check_in)}</span><span>${Number(shift.hours)} ساعات</span></div></div>`}
           <div class="row" style="background:var(--sand);border-radius:16px;padding:12px">
             <${Tile} icon="clock" tone="dark" sm />
-            <div class="grow"><div style="font-weight:600;font-size:14px">${Math.floor(elapsed / 3600000)} ساعة كاملة اتحسبت</div>
-              <div class="soft">الساعة الجاية بعد ${60 - (Math.floor(elapsed / 60000) % 60)} دقيقة</div></div>
+            <div class="grow"><div style="font-weight:600;font-size:14px">${paidHours(open, shift)} ساعة اتحسبت لحد دلوقتي</div>
+              <div class="soft">${shift ? 'شفتك بيخلص الساعة ' + shiftEndLabel + '، وبعده بتتحسب إضافي' : ''}</div></div>
           </div>
           <button class="btn dark bigbtn" disabled=${busy} onClick=${() => act('check_out')}><${Icon} name="out" size=${24} /> ${busy ? 'لحظة...' : 'سجّل انصرافك'}</button>
         </div>
-        ${dueAt && html`<div class="note warn"><b>انصراف تلقائي لو نسيت</b><br />لو نسيت تسجّل انصرافك، هيتقفل يومك تلقائيًا الساعة ${fmtTime(dueAt)}.</div>`}
+        ${showDue && html`<div class="note warn"><b>لو نسيت تسجّل الانصراف</b><br />تقدر تسجّله لحد الساعة ${cutLabel}. بعد كده يتقفل يومك على نهاية شفتك (${shiftEndLabel}) من غير إضافي.</div>`}
       ` : doneToday ? html`
         <div class="card">
           <div class="row"><${Tile} icon="check" tone="green" /><div class="grow"><div class="h2">خلّصت يومك</div>
             <div class="soft">حضور ${fmtTime(last.check_in)} · انصراف ${fmtTime(last.check_out)}</div></div></div>
-          <div class="note ok">${fullHours(last)} ساعة كاملة اتحسبت النهارده. تسلم إيدك.</div>
+          <div class="note ok">${donePaid ? (donePaid.reg + donePaid.ot) + ' ساعة اتحسبت النهارده' + (donePaid.ot > 0 ? ' (منها ' + donePaid.ot + ' إضافي)' : '') : ''}. تسلم إيدك.</div>
           ${last.closed_by === 'auto' && html`<div class="note warn">انصرافك اتسجّل تلقائيًا لأنك نسيت. الإدارة هتراجعه.</div>`}
         </div>` : html`
         <div class="card">
@@ -408,7 +425,7 @@ function EmpHistory() {
             <div class="grow"><div style="font-weight:600">${fmtShort(keyToDate(a.work_date))}</div>
               <div class="soft num">${fmtTime(a.check_in)} — ${a.check_out ? fmtTime(a.check_out) : 'لسه شغال'}</div></div>
             <div class="stack" style="align-items:flex-end;gap:4px">
-              <${Pill} tone=${lateMin(a, shift) > grace && !exs.some((e) => e.kind === 'late' && e.work_date === a.work_date) ? 'amber' : 'green'}>${fullHours(a)} ساعة<//>
+              <${Pill} tone=${lateMin(a, shift) > grace && !exs.some((e) => e.kind === 'late' && e.work_date === a.work_date) ? 'amber' : 'green'}>${paidHours(a, shift)} ساعة<//>
               ${exs.some((e) => e.kind === 'late' && e.work_date === a.work_date) && html`<span class="soft">التأخير اتلغى</span>`}
               ${a.closed_by === 'auto' && html`<span class="soft">انصراف تلقائي</span>`}
               ${a.edited && html`<span class="soft">معدّل من الإدارة</span>`}
@@ -1294,7 +1311,7 @@ function AdmEmployee({ id }) {
         <div class="h2">آخر حضور</div>
         ${rows.length === 0 ? html`<div class="soft">لسه مفيش حضور.</div>` : rows.map((a) => html`<div class="list-row">
           <div class="grow"><div style="font-weight:600">${fmtShort(keyToDate(a.work_date))}</div><div class="soft num">${fmtTime(a.check_in)} — ${a.check_out ? fmtTime(a.check_out) : 'لسه شغال'}</div></div>
-          <${Pill} tone=${lateMin(a, sh) > grace ? 'amber' : 'green'}>${fullHours(a)} ساعة<//></div>`)}
+          <${Pill} tone=${lateMin(a, sh) > grace ? 'amber' : 'green'}>${paidHours(a, sh)} ساعة<//></div>`)}
       </div>
       <div class="card">
         <div class="h2">الحساب</div>
@@ -1369,7 +1386,7 @@ function AdmAtt() {
           return html`<button class="list-row" onClick=${() => setEdit(a)}>
             <div class=${'avatar tone-' + (a.review === 'pending' || isLate ? 'amber' : 'green')}>${initial(a.staff && a.staff.full_name)}</div>
             <div class="grow"><div style="font-weight:600">${a.staff ? a.staff.full_name : '—'}${mode === 'pending' ? ' · ' + fmtShort(keyToDate(a.work_date)) : ''}</div>
-              <div class="soft num">${fmtTime(a.check_in)} — ${a.check_out ? fmtTime(a.check_out) : 'لسه شغال'} · ${fullHours(a)} ساعة</div></div>
+              <div class="soft num">${fmtTime(a.check_in)} — ${a.check_out ? fmtTime(a.check_out) : 'لسه شغال'} · ${paidHours(a, sh)} ساعة</div></div>
             <div class="stack" style="align-items:flex-end;gap:4px">
               ${isLate && html`<${Pill} tone="amber">متأخر<//>`}
               ${lateEx && html`<${Pill} tone="green">التأخير اتلغى<//>`}
@@ -1618,7 +1635,7 @@ function SetRules() {
     <div class="body flat">
       <div class="card">
         ${row('فترة السماح', 'التأخير لحد الدقايق دي مابيتحسبش تأخير', html`<${Stepper} value=${f.grace} min=${0} max=${120} step=${5} unit=" د" onChange=${(v) => setF({ ...f, grace: v })} />`)}
-        ${row('الانصراف التلقائي', 'لو الموظف نسي الانصراف، اليوم بيتقفل بعد مدة الشفت من حضوره', html`<${Toggle} on=${f.auto} onChange=${(v) => setF({ ...f, auto: v })} />`)}
+        ${row('الانصراف التلقائي', 'لو الموظف نسي الانصراف، يقدر يسجّله لحد الساعة 2 الفجر. بعدها اليوم بيتقفل على نهاية شفته من غير إضافي', html`<${Toggle} on=${f.auto} onChange=${(v) => setF({ ...f, auto: v })} />`)}
       </div>
       <div class="card">
         <div class="h2">الإشعارات للإدارة</div>
@@ -1681,7 +1698,7 @@ function SetPay() {
     <${Hero} title="حساب المرتب" back="settings" slim />
     <div class="body flat">
       <div class="card">
-        <div class="row"><${Tile} icon="clock" tone="sand" sm /><div class="grow"><div class="h3">سعر الساعة</div><div class="soft">المرتب ÷ أيام الشهر ÷ ساعات الشفت. الرصيد بيزيد بالساعة الكاملة من وقت حضور الموظف.</div></div></div>
+        <div class="row"><${Tile} icon="clock" tone="sand" sm /><div class="grow"><div class="h3">سعر الساعة</div><div class="soft">المرتب ÷ أيام الشهر ÷ ساعات الشفت. الرصيد بيزيد بالساعة الكاملة حسب مواعيد الشفت: الساعة اللي قبل الشفت مش بتتحسب، وبعد نهاية الشفت بتتحسب إضافي.</div></div></div>
         <div class="note info">مثال: 10,000 ÷ 30 ÷ 8 = ${fmtMoney(10000 / 30 / 8)} ج.م للساعة، والساعة الإضافية ${fmtMoney((10000 / 30 / 8) * f.ot / 100)} ج.م.</div>
       </div>
       <div class="card">
