@@ -750,20 +750,38 @@ async function voidExcuseAsk(ex, done) {
   done();
 }
 
+function PickEmployee({ title, onPick, onClose }) {
+  const [list, setList] = useState(null);
+  const [q, setQ] = useState('');
+  useEffect(() => { sb.from('staff').select('id,full_name,code,department').eq('active', true).order('full_name').then(({ data }) => setList(data || [])); }, []);
+  const shown = (list || []).filter((s) => { const t = q.trim().toLowerCase(); return !t || s.full_name.toLowerCase().includes(t) || s.code.toLowerCase().includes(t); });
+  return html`<${Sheet} title=${title} onClose=${onClose}>
+    <input class="input" placeholder="دوّر بالاسم أو الكود" value=${q} onInput=${(e) => setQ(e.target.value)} />
+    <div style="max-height:52vh;overflow:auto">
+      ${list === null ? html`<div class="empty">لحظة...</div>` : shown.length === 0 ? html`<div class="empty">مفيش نتايج.</div>` : shown.map((s) => html`<button class="list-row" onClick=${() => onPick(s)}>
+        <div class="avatar tone-sand">${initial(s.full_name)}</div>
+        <div class="grow" style="text-align:start"><div style="font-weight:600">${s.full_name}</div><div class="soft">كود ${s.code}${s.department ? ' · ' + s.department : ''}</div></div><${Chev} /></button>`)}
+    </div>
+  <//>`;
+}
+
 function AdmDash({ unread }) {
   const [board, setBoard] = useState(null);
-  const [cnt, setCnt] = useState({ review: 0, leaves: 0, advances: 0 });
+  const [need, setNeed] = useState({ leaves: [], advances: [], reviews: [] });
   const [ex, setEx] = useState(null);
+  const [dec, setDec] = useState(null);
+  const [pick, setPick] = useState(null);
+  const [adj, setAdj] = useState(null);
   async function load() {
-    const head = { count: 'exact', head: true };
+    const none = Promise.resolve({ data: [] });
     const [b, p, l, a] = await Promise.all([
-      can('attendance.view') ? sb.rpc('today_board') : Promise.resolve({ data: [] }),
-      sb.from('attendance').select('id', head).eq('review', 'pending'),
-      sb.from('leaves').select('id', head).eq('status', 'pending'),
-      sb.from('advances').select('id', head).eq('status', 'pending'),
+      can('attendance.view') ? sb.rpc('today_board') : none,
+      can('attendance.view') ? sb.from('attendance').select('id, work_date, staff(full_name)').eq('review', 'pending').order('work_date', { ascending: false }).limit(20) : none,
+      can('leaves.decide') ? sb.from('leaves').select('*, staff(full_name, code)').eq('status', 'pending').order('created_at', { ascending: true }).limit(20) : none,
+      can('advances.decide') ? sb.from('advances').select('*, staff(full_name, code)').eq('status', 'pending').order('created_at', { ascending: true }).limit(20) : none,
     ]);
     if (!b.error) setBoard(b.data || []);
-    setCnt({ review: p.count || 0, leaves: l.count || 0, advances: a.count || 0 });
+    setNeed({ reviews: p.data || [], leaves: l.data || [], advances: a.data || [] });
   }
   useEffect(() => {
     load();
@@ -771,33 +789,61 @@ function AdmDash({ unread }) {
     window.addEventListener('adm-refresh', load);
     return () => { clearInterval(t); window.removeEventListener('adm-refresh', load); };
   }, []);
+  async function decideNow(fn, ok) {
+    const { error } = await fn();
+    if (error) return toast(errText(error.message), 'bad');
+    toast(ok);
+    load();
+  }
   const c = { present: 0, late: 0, absent: 0, waiting: 0, leave: 0 };
   (board || []).forEach((r) => { c[r.status] = (c[r.status] || 0) + 1; });
   const total = board ? board.length : 0;
-  const row = (href, icon, tone, label, n, tn) => html`<a class="list-row" href=${href}><${Tile} icon=${icon} tone=${tone} sm /><div class="grow" style="font-weight:500">${label}</div><${Pill} tone=${n ? tn : 'sand'}>${n}<//><${Chev} /></a>`;
+  const totalNeed = need.leaves.length + need.advances.length + need.reviews.length;
+  const canDecide = can('leaves.decide') || can('advances.decide') || can('attendance.view');
+  const bs = 'height:38px;padding:0 12px;font-size:13px;border-radius:12px';
+  const reqRow = (key, icon, tone, name, sub, actions) => html`<div class="list-row" key=${key}>
+    <${Tile} icon=${icon} tone=${tone} sm />
+    <div class="grow"><div style="font-weight:600">${name}</div><div class="soft">${sub}</div></div>
+    ${actions}</div>`;
+  const okBtn = (label, fn) => html`<button class="btn auto" style=${bs + ';box-shadow:none'} onClick=${fn}>${label}</button>`;
+  const tileStyle = 'height:76px;flex-direction:column;gap:6px;padding:0;font-size:14px';
+  const tiles = [];
+  if (can('employees.edit')) tiles.push(html`<a class="btn ghost" style=${tileStyle} href="#add"><${Icon} name="plus" size=${24} />إضافة موظف</a>`);
+  if (can('payroll.edit')) tiles.push(html`<button class="btn ghost" style=${tileStyle} onClick=${() => setPick('adj')}><${Icon} name="gift" size=${24} />مكافأة أو خصم</button>`);
+  if (can('attendance.view')) tiles.push(html`<a class="btn ghost" style=${tileStyle} href="#att"><${Icon} name="calendar" size=${24} />حضور وغياب</a>`);
+  if (can('payroll.edit')) tiles.push(html`<button class="btn ghost" style=${tileStyle} onClick=${() => setPick('backfill')}><${Icon} name="clock" size=${24} />أيام سابقة</button>`);
+  if (can('leaves.decide') || can('advances.decide')) tiles.push(html`<a class="btn ghost" style=${tileStyle} href="#requests"><${Icon} name="file" size=${24} />كل الطلبات${need.leaves.length + need.advances.length > 0 ? ' (' + (need.leaves.length + need.advances.length) + ')' : ''}</a>`);
+  if (can('payroll.view')) tiles.push(html`<a class="btn ghost" style=${tileStyle} href="#pay"><${Icon} name="lock" size=${24} />قفل الشهر</a>`);
   return html`<div class="page">
     <${Hero} title="أهلاً يا إدارة" sub=${fmtDay(new Date()) + (board ? ' · ' + total + ' موظف' : '')} bell=${html`<${Bell} count=${unread} />`} />
     <div class="body">
-      ${can('attendance.view') && html`<div class="card">
-        <div class="spread"><div class="h2">النهاردة</div><${Pill} icon="clock">محدّث الآن<//></div>
-        <div class="bar">${total ? ['present', 'late', 'absent', 'leave'].map((k) => c[k] > 0 && html`<div style=${'flex:' + c[k] + ';background:' + (k === 'present' ? 'var(--green)' : k === 'late' ? '#E0A93D' : k === 'leave' ? '#7C89A8' : 'var(--red)')}></div>`) : ''}</div>
-        <div class="stats">
-          <div class="stat"><span class="tile sm tone-green"><${Icon} name="check" size=${20} /></span><span class="big num">${c.present}</span><span class="soft">حاضر</span></div>
-          <div class="stat"><span class="tile sm tone-amber"><${Icon} name="clock" size=${20} /></span><span class="big num">${c.late}</span><span class="soft">متأخر</span></div>
-          <div class="stat"><span class="tile sm tone-red"><${Icon} name="xcircle" size=${20} /></span><span class="big num">${c.absent}</span><span class="soft">غايب</span></div>
-          <div class="stat"><span class="tile sm tone-slate"><${Icon} name="sun" size=${20} /></span><span class="big num">${c.leave}</span><span class="soft">إجازة</span></div>
-        </div>
+      ${can('attendance.view') && html`<div class="chips">
+        <${Pill} tone="green" icon="check">${c.present} حاضر<//>
+        <${Pill} tone="amber" icon="clock">${c.late} متأخر<//>
+        <${Pill} tone="red" icon="xcircle">${c.absent} غايب<//>
+        <${Pill} tone="slate" icon="sun">${c.leave} إجازة<//>
       </div>`}
-      <div class="card tight">
+      ${canDecide && html`<div class="card tight">
         <div class="h2" style="padding:12px 0 4px">محتاج قرارك</div>
-        ${can('leaves.decide') && row('#requests', 'sun', 'slate', 'طلبات الإجازة', cnt.leaves, 'amber')}
-        ${can('advances.decide') && row('#requests/advances', 'down', 'amber', 'طلبات السلف', cnt.advances, 'amber')}
-        ${can('attendance.view') && row('#att', 'auto', 'sand', 'انصراف تلقائي للمراجعة', cnt.review, 'amber')}
-        ${row('#notifications', 'bell', 'slate', 'إشعارات جديدة', unread, 'red')}
-      </div>
+        ${totalNeed === 0 ? html`<div class="empty"><${Icon} name="check" size=${24} /> <span>مفيش حاجة محتاجة قرارك دلوقتي.</span></div>` : html`
+          ${need.leaves.map((l) => reqRow('l' + l.id, 'sun', 'slate', l.staff ? l.staff.full_name : '',
+            'طلب إجازة · ' + fmtShort(keyToDate(l.from_date)) + (l.to_date !== l.from_date ? ' ← ' + fmtShort(keyToDate(l.to_date)) : ''),
+            html`<button class="btn ghost auto" style=${bs} onClick=${() => setDec({ kind: 'leave', item: l })}>رفض</button>
+              ${okBtn('قبول', () => decideNow(() => sb.rpc('decide_leave', { p_id: l.id, p_approve: true, p_note: '', p_force_unpaid: false }), 'اتقبلت الإجازة'))}`))}
+          ${need.advances.map((x) => reqRow('a' + x.id, 'down', 'amber', x.staff ? x.staff.full_name : '',
+            'سلفة ' + fmtMoney(x.amount) + ' ج.م على ' + x.installments + (x.installments > 1 ? ' أقساط' : ' قسط'),
+            html`<button class="btn ghost auto" style=${bs} onClick=${() => setDec({ kind: 'advance', item: x })}>رفض</button>
+              ${okBtn('قبول', () => decideNow(() => sb.rpc('decide_advance', { p_id: x.id, p_approve: true, p_note: '', p_installments: x.installments, p_start: monthStart(todayKey()) }), 'اتقبلت السلفة'))}`))}
+          ${need.reviews.map((r) => reqRow('r' + r.id, 'auto', 'sand', r.staff ? r.staff.full_name : '',
+            'نسي الانصراف · ' + fmtShort(keyToDate(r.work_date)),
+            html`<a class="btn ghost auto" style=${bs} href="#att/pending">تعديل</a>
+              ${okBtn('اعتماد', () => decideNow(() => sb.rpc('review_attendance', { p_id: r.id }), 'اتعتمد اليوم'))}`))}`}
+      </div>`}
+      ${tiles.length > 0 && html`<div class="h2" style="margin-top:4px">اعمل بسرعة</div>
+        <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px">${tiles}</div>`}
       ${can('attendance.view') && html`<div class="card tight">
         <div class="h2" style="padding:12px 0 4px">حضور اليوم</div>
-        ${board === null ? html`<div class="empty">لحظة...</div>` : board.length === 0 ? html`<div class="empty">لسه مفيش موظفين. ضيف أول موظف من تبويب الموظفين.</div>` : board.map((r) => html`
+        ${board === null ? html`<div class="empty">لحظة...</div>` : board.length === 0 ? html`<div class="empty">لسه مفيش موظفين. ضيف أول موظف من زرار إضافة موظف.</div>` : board.map((r) => html`
           <div class="list-row">
             <a class="row grow" href=${'#employee/' + r.staff_id}>
               <div class=${'avatar tone-' + STATUS[r.status].tone}>${initial(r.full_name)}</div>
@@ -810,6 +856,10 @@ function AdmDash({ unread }) {
       </div>`}
     </div>
     ${ex && html`<${ExcuseSheet} ...${ex} date=${todayKey()} onClose=${() => setEx(null)} onDone=${() => { setEx(null); load(); }} />`}
+    ${dec && html`<${DecideSheet} kind=${dec.kind} item=${dec.item} approve=${false} onClose=${() => setDec(null)} onDone=${() => { setDec(null); load(); }} />`}
+    ${pick && html`<${PickEmployee} title=${pick === 'adj' ? 'مكافأة أو خصم لمين؟' : 'أيام سابقة لمين؟'} onClose=${() => setPick(null)}
+      onPick=${(s) => { const w = pick; setPick(null); if (w === 'adj') setAdj({ staffId: s.id }); else location.hash = '#backfill/' + s.id; }} />`}
+    ${adj && html`<${AdjSheet} staffId=${adj.staffId} kind="bonus" month=${monthStart(todayKey())} onClose=${() => setAdj(null)} onDone=${() => setAdj(null)} />`}
   </div>`;
 }
 
@@ -1247,16 +1297,27 @@ function AdmEmployee({ id }) {
   const [rows, setRows] = useState([]);
   const [busy, setBusy] = useState(false);
   const [cred, setCred] = useState(null);
+  const [pay, setPay] = useState(null);
+  const [today, setToday] = useState(null);
+  const [showAtt, setShowAtt] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [adj, setAdj] = useState(null);
+  const month = monthStart(todayKey());
   async function load() {
-    const [a, b, c] = await Promise.all([
+    const none = Promise.resolve({ data: null });
+    const [a, b, c, d, e] = await Promise.all([
       sb.from('staff').select('*').eq('id', id).maybeSingle(),
       sb.from('shifts').select('*').order('created_at'),
       sb.from('attendance').select('*').eq('staff_id', id).order('work_date', { ascending: false }).limit(10),
+      can('payroll.view') ? sb.rpc('staff_payroll', { p_staff: id, p_month: month }) : none,
+      can('attendance.view') ? sb.rpc('today_board') : none,
     ]);
     setS(a.data);
     if (a.data) setF({ name: a.data.full_name, phone: a.data.phone || '', dept: a.data.department || '', job: a.data.job_title || '', salary: String(a.data.base_salary ?? ''), shift: a.data.shift_id || '', start: a.data.start_date || '', anyLoc: a.data.any_location });
     setShifts(b.data || []);
     setRows(c.data || []);
+    if (d && !d.error) setPay(d.data);
+    if (e && e.data) setToday(e.data.find((r) => r.staff_id === id) || null);
   }
   useEffect(() => { load(); }, [id]);
   if (!s || !f) return html`<div class="page nonav"><${Hero} title="ملف الموظف" back="employees" slim /><div class="body flat"><div class="card"><div class="empty">لحظة...</div></div></div></div>`;
@@ -1269,6 +1330,7 @@ function AdmEmployee({ id }) {
     setBusy(false);
     if (error) return toast(errText(error.message), 'bad');
     toast('اتحفظت التعديلات');
+    setEditing(false);
     load();
   }
   async function resetPin() {
@@ -1287,11 +1349,38 @@ function AdmEmployee({ id }) {
     setBusy(false);
   }
   const grace = Number(CTX.S.grace_minutes ?? 30);
+  const c = pay && pay.calc;
+  const open = !pay || pay.status === 'open';
+  const canEditStaff = can('employees.edit');
   return html`<div class="page nonav">
-    <${Hero} title=${s.full_name} back="employees" sub=${'كود ' + s.code + (s.department ? ' · ' + s.department : '') + ' · ' + ROLE_LABEL[s.role]} slim />
+    <${Hero} title="ملف الموظف" back="employees" sub=${ROLE_LABEL[s.role]} slim />
     <div class="body flat">
       ${!s.active && html`<div class="note bad">الموظف موقوف ومش قادر يدخل.</div>`}
       <div class="card">
+        <div class="row"><div class="avatar tone-sand">${initial(s.full_name)}</div>
+          <div class="grow"><div class="h2">${s.full_name}</div><div class="soft">كود ${s.code}${s.department ? ' · ' + s.department : ''}${sh ? ' · ' + shiftRange(sh) : ''}</div></div>
+          ${today && html`<${Pill} tone=${STATUS[today.status].tone}>${STATUS[today.status].label}<//>`}</div>
+      </div>
+      ${can('payroll.view') && html`<div class="card">
+        <div class="soft">رصيده لحد دلوقتي</div>
+        <div class="num" style="font-family:var(--hf);font-weight:600;font-size:34px;line-height:1.2">${c ? fmtMoney(c.net) : '...'} <span class="soft" style="font-size:15px">ج.م</span></div>
+        <div class="soft">القبض ${fmtShort(keyToDate(paydayOf(month, s)))}</div>
+        ${can('payroll.edit') && open && html`<div class="row"><button class="btn small grow" style="box-shadow:none" onClick=${() => setAdj('bonus')}><${Icon} name="plus" size=${20} /> مكافأة</button>
+          <button class="btn small ghost grow" onClick=${() => setAdj('deduction')}><${Icon} name="minus" size=${20} /> خصم</button></div>`}
+      </div>`}
+      <div class="card tight">
+        ${can('payroll.view') && html`<a class="list-row" href=${'#payroll/' + id + '/' + month}><${Tile} icon="wallet" tone="green" sm /><div class="grow" style="font-weight:500">تفاصيل المرتب</div><${Chev} /></a>`}
+        ${can('attendance.view') && html`<button class="list-row" onClick=${() => setShowAtt(!showAtt)}><${Tile} icon="calendar" tone="sand" sm /><div class="grow" style="font-weight:500;text-align:start">سجل الحضور</div><${Chev} /></button>`}
+        ${can('payroll.edit') && html`<a class="list-row" href=${'#backfill/' + id}><${Tile} icon="clock" tone="slate" sm /><div class="grow" style="font-weight:500">أيام سابقة</div><${Chev} /></a>`}
+        ${canEditStaff && html`<button class="list-row" onClick=${() => setEditing(!editing)}><${Tile} icon="user" tone="amber" sm /><div class="grow" style="font-weight:500;text-align:start">تعديل البيانات</div><${Chev} /></button>`}
+      </div>
+      ${showAtt && html`<div class="card">
+        <div class="h2">آخر حضور</div>
+        ${rows.length === 0 ? html`<div class="soft">لسه مفيش حضور.</div>` : rows.map((a) => html`<div class="list-row">
+          <div class="grow"><div style="font-weight:600">${fmtShort(keyToDate(a.work_date))}</div><div class="soft num">${fmtTime(a.check_in)} — ${a.check_out ? fmtTime(a.check_out) : 'لسه شغال'}</div></div>
+          <${Pill} tone=${lateMin(a, sh) > grace ? 'amber' : 'green'}>${paidHours(a, sh)} ساعة<//></div>`)}
+      </div>`}
+      ${editing && canEditStaff && html`<div class="card">
         <div class="h2">البيانات</div>
         <label class="field">الاسم<input class="input" value=${f.name} onInput=${(e) => set('name', e.target.value)} /></label>
         <label class="field">الموبايل<input class="input num-in" inputmode="tel" value=${f.phone} onInput=${(e) => set('phone', e.target.value)} /></label>
@@ -1302,29 +1391,19 @@ function AdmEmployee({ id }) {
         <label class="field">تاريخ بداية الشغل<input class="input" type="date" value=${f.start} onInput=${(e) => set('start', e.target.value)} /></label>
         <div class="row"><div class="grow"><div style="font-weight:600;color:var(--ink)">يسجّل من أي مكان</div><div class="soft">مقفول: لازم يكون داخل نطاق الشغل</div></div><${Toggle} on=${f.anyLoc} onChange=${(v) => set('anyLoc', v)} /></div>
         <button class="btn dark small" disabled=${busy} onClick=${save}>حفظ التعديلات</button>
-      </div>
-      ${(can('payroll.view') || can('payroll.edit')) && html`<div class="card tight">
-        ${can('payroll.view') && html`<a class="list-row" href=${'#payroll/' + id + '/' + monthStart(todayKey())}><${Tile} icon="wallet" tone="green" sm /><div class="grow" style="font-weight:500">المرتب والمكافآت والخصومات</div><${Chev} /></a>`}
-        ${can('payroll.edit') && html`<a class="list-row" href=${'#backfill/' + id}><${Tile} icon="calendar" tone="sand" sm /><div class="grow" style="font-weight:500">إدخال أيام سابقة</div><${Chev} /></a>`}
       </div>`}
-      <div class="card">
-        <div class="h2">آخر حضور</div>
-        ${rows.length === 0 ? html`<div class="soft">لسه مفيش حضور.</div>` : rows.map((a) => html`<div class="list-row">
-          <div class="grow"><div style="font-weight:600">${fmtShort(keyToDate(a.work_date))}</div><div class="soft num">${fmtTime(a.check_in)} — ${a.check_out ? fmtTime(a.check_out) : 'لسه شغال'}</div></div>
-          <${Pill} tone=${lateMin(a, sh) > grace ? 'amber' : 'green'}>${paidHours(a, sh)} ساعة<//></div>`)}
-      </div>
-      <div class="card">
-        <div class="h2">الحساب</div>
-        <button class="btn ghost" disabled=${busy} onClick=${resetPin}><${Icon} name="lock" size=${20} /> تغيير الـ PIN</button>
-        <button class="btn ghost" disabled=${busy} style=${s.active ? 'color:var(--red)' : ''} onClick=${toggleActive}>${s.active ? 'إيقاف الموظف' : 'تفعيل الموظف'}</button>
-      </div>
+      ${canEditStaff && html`<div class="row">
+        <button class="btn ghost small grow" disabled=${busy} onClick=${resetPin}><${Icon} name="lock" size=${20} /> تغيير الـ PIN</button>
+        <button class="btn ghost small grow" disabled=${busy} style=${s.active ? 'color:var(--red)' : ''} onClick=${toggleActive}><${Icon} name="xcircle" size=${20} /> ${s.active ? 'إيقاف الموظف' : 'تفعيل الموظف'}</button>
+      </div>`}
     </div>
     ${cred && html`<${Credentials} ...${cred} onClose=${() => setCred(null)} />`}
+    ${adj && html`<${AdjSheet} staffId=${id} kind=${adj} month=${month} onClose=${() => setAdj(null)} onDone=${() => { setAdj(null); load(); }} />`}
   </div>`;
 }
 
-function AdmAtt() {
-  const [mode, setMode] = useState('day');
+function AdmAtt({ init }) {
+  const [mode, setMode] = useState(init === 'pending' ? 'pending' : 'day');
   const [day, setDay] = useState(todayKey());
   const [rows, setRows] = useState(null);
   const [shifts, setShifts] = useState({});
@@ -1370,7 +1449,7 @@ function AdmAtt() {
   const canEdit = can('attendance.edit');
   const smallBtn = 'height:38px;padding:0 12px;font-size:13px;border-radius:12px';
   return html`<div class="page">
-    <${Hero} title="الحضور" sub="راجع وعدّل سجلات الحضور" />
+    <${Hero} title="الحضور" sub="راجع وعدّل سجلات الحضور" back="dash" slim />
     <div class="body">
       <div class="chips"><button class=${'chip' + (mode === 'day' ? ' on' : '')} onClick=${() => setMode('day')}>حسب اليوم</button>
         <button class=${'chip' + (mode === 'pending' ? ' on' : '')} onClick=${() => setMode('pending')}>للمراجعة${pendingCount != null ? ' ' + pendingCount : ''}</button></div>
@@ -1841,9 +1920,8 @@ function SetPerm() {
 
 /* ================= admin shell ================= */
 const ADM_NAV_ALL = [
-  { id: 'dash', icon: 'home', label: 'الرئيسية' },
+  { id: 'dash', icon: 'home', label: 'اليوم' },
   { id: 'employees', icon: 'users', label: 'الموظفين', ok: () => can('employees.view') },
-  { id: 'att', icon: 'calendar', label: 'الحضور', ok: () => can('attendance.view') },
   { id: 'pay', icon: 'wallet', label: 'المرتبات', ok: () => can('payroll.view') },
   { id: 'settings', icon: 'sliders', label: 'الإعدادات', ok: () => can('settings.edit') || can('roles.manage') || can('log.view') },
 ];
@@ -1877,7 +1955,7 @@ function AdminShell({ route }) {
   if (head === 'employee' && parts[1]) { view = gate(can('employees.view'), html`<${AdmEmployee} id=${parts[1]} key=${parts[1]} />`); tab = 'employees'; hideNav = true; }
   else if (head === 'add') { view = gate(can('employees.edit'), html`<${AdmAdd} />`); tab = 'employees'; hideNav = true; }
   else if (head === 'employees') view = gate(can('employees.view'), html`<${AdmEmployees} />`);
-  else if (head === 'att') view = gate(can('attendance.view'), html`<${AdmAtt} />`);
+  else if (head === 'att') { view = gate(can('attendance.view'), html`<${AdmAtt} init=${parts[1]} key=${parts[1] || 'day'} />`); tab = 'dash'; }
   else if (head === 'pay') view = gate(can('payroll.view'), html`<${AdmPay} />`);
   else if (head === 'payroll') { view = gate(can('payroll.view'), html`<${AdmPayroll} id=${parts[1]} month=${parts[2]} key=${parts[1] + parts[2]} />`); tab = 'pay'; hideNav = true; }
   else if (head === 'backfill') { view = gate(can('payroll.edit'), html`<${Backfill} id=${parts[1]} month=${parts[2]} key=${parts[1] + parts[2]} />`); tab = 'pay'; hideNav = true; }
