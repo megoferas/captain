@@ -183,7 +183,9 @@ function getPos() {
     navigator.geolocation.getCurrentPosition(
       (p) => resolve({ lat: p.coords.latitude, lon: p.coords.longitude, acc: p.coords.accuracy }),
       (e) => reject(new Error(e.code === 1 ? 'gps_denied' : 'no_gps')),
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+      // maximumAge > 0: a location a few seconds old is fine, and forcing a brand-new fix every time
+      // is what made check-in randomly fail indoors even though the screen already had a good, recent fix
+      { enableHighAccuracy: true, timeout: 20000, maximumAge: 8000 }
     );
   });
 }
@@ -361,8 +363,11 @@ function EmpHome({ unread }) {
   async function act(kind) {
     setBusy(true);
     try {
-      let p = null;
-      try { p = await getPos(); } catch (e) { if (!me.any_location) throw e; }
+      // reuse the location the screen is already showing you (the green/red banner above) instead of
+      // forcing a brand-new GPS fix on every tap — that second, redundant request was what randomly
+      // failed indoors even though a good, recent position was already on screen
+      let p = pos;
+      if (!p) { try { p = await getPos(); } catch (e) { if (!me.any_location) throw e; } }
       const { error } = await sb.rpc(kind, { p_lat: p ? p.lat : null, p_lon: p ? p.lon : null, p_accuracy: p ? p.acc : null });
       if (error) throw new Error(error.message);
       toast(kind === 'check_in' ? 'اتسجّل حضورك. يومك سعيد' : 'اتسجّل انصرافك. تسلم إيدك');
@@ -385,7 +390,7 @@ function EmpHome({ unread }) {
           <div class="soft">سجّلت حضورك الساعة ${fmtTime(open.check_in)}</div>
           ${shift && html`<div class="soft">شفتك بيخلص الساعة ${shiftEndLabel}</div>`}
           ${open.in_zone === false && html`<div class="note warn">حضورك اتسجّل من خارج مكان الشغل.</div>`}
-          <button class="btn dark bigbtn" style="width:100%" disabled=${busy} onClick=${() => act('check_out')}><${Icon} name="out" size=${24} /> ${busy ? 'لحظة...' : 'سجّل انصرافك'}</button>
+          <button class="btn dark bigbtn" style="width:100%" disabled=${busy || (!me.any_location && !pos && S.checkout_requires_zone !== false)} onClick=${() => act('check_out')}><${Icon} name="out" size=${24} /> ${busy ? 'لحظة...' : (!me.any_location && !pos && S.checkout_requires_zone !== false) ? 'بنستنى تحديد موقعك...' : 'سجّل انصرافك'}</button>
         </div>
         ${showDue && html`<div class="note info">لو نسيت تسجّل انصرافك، بيتسجّل لوحده على نهاية شفتك.</div>`}
       ` : doneToday ? html`
@@ -401,7 +406,7 @@ function EmpHome({ unread }) {
           ${shift && html`<div class="soft">شفتك النهارده</div><div class="h2 num">${shiftRange(shift)}</div>`}
           <div class=${'row note ' + (zone.tone === 'green' ? 'ok' : zone.tone === 'red' ? 'bad' : zone.tone === 'amber' ? 'warn' : 'info')} style="width:100%;text-align:start">
             <${Icon} name=${zone.icon} size=${20} /><div class="grow" style="font-weight:500">${zone.text}</div></div>
-          <button class="btn bigbtn" style="width:100%" disabled=${busy} onClick=${() => act('check_in')}><${Icon} name="check" size=${24} /> ${busy ? 'لحظة...' : 'سجّل حضورك'}</button>
+          <button class="btn bigbtn" style="width:100%" disabled=${busy || (!me.any_location && !pos)} onClick=${() => act('check_in')}><${Icon} name="check" size=${24} /> ${busy ? 'لحظة...' : (!me.any_location && !pos) ? 'بنستنى تحديد موقعك...' : 'سجّل حضورك'}</button>
         </div>`}
 
       ${pay && pay.calc && html`<a class="card" href="#salary" style="gap:8px">
